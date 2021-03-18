@@ -15,7 +15,10 @@
  */
 import NIO
 
-internal class GRPCClientCodecHandler<Serializer: MessageSerializer, Deserializer: MessageDeserializer> {
+internal class GRPCClientCodecHandler<
+  Serializer: MessageSerializer,
+  Deserializer: MessageDeserializer
+> {
   /// The request serializer.
   private let serializer: Serializer
 
@@ -34,21 +37,25 @@ extension GRPCClientCodecHandler: ChannelInboundHandler {
 
   internal func channelRead(context: ChannelHandlerContext, data: NIOAny) {
     switch self.unwrapInboundIn(data) {
-    case .initialMetadata(let headers):
+    case let .initialMetadata(headers):
       context.fireChannelRead(self.wrapInboundOut(.initialMetadata(headers)))
 
-    case .message(let messageContext):
+    case let .message(messageContext):
       do {
         let response = try self.deserializer.deserialize(byteBuffer: messageContext.message)
-        context.fireChannelRead(self.wrapInboundOut(.message(.init(response, compressed: messageContext.compressed))))
+        context
+          .fireChannelRead(
+            self
+              .wrapInboundOut(.message(.init(response, compressed: messageContext.compressed)))
+          )
       } catch {
         context.fireErrorCaught(error)
       }
 
-    case .trailingMetadata(let trailers):
+    case let .trailingMetadata(trailers):
       context.fireChannelRead(self.wrapInboundOut(.trailingMetadata(trailers)))
 
-    case .status(let status):
+    case let .status(status):
       context.fireChannelRead(self.wrapInboundOut(.status(status)))
     }
   }
@@ -58,15 +65,105 @@ extension GRPCClientCodecHandler: ChannelOutboundHandler {
   typealias OutboundIn = _GRPCClientRequestPart<Serializer.Input>
   typealias OutboundOut = _RawGRPCClientRequestPart
 
-  internal func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
+  internal func write(
+    context: ChannelHandlerContext,
+    data: NIOAny,
+    promise: EventLoopPromise<Void>?
+  ) {
     switch self.unwrapOutboundIn(data) {
-    case .head(let head):
+    case let .head(head):
       context.write(self.wrapOutboundOut(.head(head)), promise: promise)
 
-    case .message(let message):
+    case let .message(message):
       do {
-        let serialized = try self.serializer.serialize(message.message, allocator: context.channel.allocator)
-        context.write(self.wrapOutboundOut(.message(.init(serialized, compressed: message.compressed))), promise: promise)
+        let serialized = try self.serializer.serialize(
+          message.message,
+          allocator: context.channel.allocator
+        )
+        context.write(
+          self.wrapOutboundOut(.message(.init(serialized, compressed: message.compressed))),
+          promise: promise
+        )
+      } catch {
+        promise?.fail(error)
+        context.fireErrorCaught(error)
+      }
+
+    case .end:
+      context.write(self.wrapOutboundOut(.end), promise: promise)
+    }
+  }
+}
+
+// MARK: Reverse Codec
+
+internal class GRPCClientReverseCodecHandler<
+  Serializer: MessageSerializer,
+  Deserializer: MessageDeserializer
+> {
+  /// The request serializer.
+  private let serializer: Serializer
+
+  /// The response deserializer.
+  private let deserializer: Deserializer
+
+  internal init(serializer: Serializer, deserializer: Deserializer) {
+    self.serializer = serializer
+    self.deserializer = deserializer
+  }
+}
+
+extension GRPCClientReverseCodecHandler: ChannelInboundHandler {
+  typealias InboundIn = _GRPCClientResponsePart<Serializer.Input>
+  typealias InboundOut = _RawGRPCClientResponsePart
+
+  internal func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+    switch self.unwrapInboundIn(data) {
+    case let .initialMetadata(headers):
+      context.fireChannelRead(self.wrapInboundOut(.initialMetadata(headers)))
+
+    case let .message(messageContext):
+      do {
+        let response = try self.serializer.serialize(
+          messageContext.message,
+          allocator: context.channel.allocator
+        )
+        context.fireChannelRead(
+          self.wrapInboundOut(.message(.init(response, compressed: messageContext.compressed)))
+        )
+      } catch {
+        context.fireErrorCaught(error)
+      }
+
+    case let .trailingMetadata(trailers):
+      context.fireChannelRead(self.wrapInboundOut(.trailingMetadata(trailers)))
+
+    case let .status(status):
+      context.fireChannelRead(self.wrapInboundOut(.status(status)))
+    }
+  }
+}
+
+extension GRPCClientReverseCodecHandler: ChannelOutboundHandler {
+  typealias OutboundIn = _RawGRPCClientRequestPart
+  typealias OutboundOut = _GRPCClientRequestPart<Deserializer.Output>
+
+  internal func write(
+    context: ChannelHandlerContext,
+    data: NIOAny,
+    promise: EventLoopPromise<Void>?
+  ) {
+    switch self.unwrapOutboundIn(data) {
+    case let .head(head):
+      context.write(self.wrapOutboundOut(.head(head)), promise: promise)
+
+    case let .message(message):
+      do {
+        let deserialized = try self.deserializer.deserialize(byteBuffer: message.message)
+        context.write(
+          self.wrapOutboundOut(.message(.init(deserialized, compressed: message.compressed))),
+          promise: promise
+        )
       } catch {
         promise?.fail(error)
         context.fireErrorCaught(error)

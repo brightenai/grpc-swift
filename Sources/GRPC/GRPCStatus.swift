@@ -19,17 +19,12 @@ import NIOHTTP1
 import NIOHTTP2
 
 /// Encapsulates the result of a gRPC call.
-///
-/// We use a `class` here for a couple of reasons:
-/// - The size of the equivalent `struct` is larger than the value buffer in an existential
-///   container so would incur a heap allocation each time a `GRPCStatus` is passed to a function
-///   taking an `Error`.
-/// - We aren't using value semantics (since all properties are constant).
-public final class GRPCStatus: Error {
-  /// The status code of the RPC.
-  public let code: Code
+public struct GRPCStatus: Error {
   /// The status message of the RPC.
-  public let message: String?
+  public var message: String?
+
+  /// The status code of the RPC.
+  public var code: Code
 
   /// Whether the status is '.ok'.
   public var isOk: Bool {
@@ -47,9 +42,12 @@ public final class GRPCStatus: Error {
   ///
   /// - Important: This should *not* be used when checking whether a returned status has an 'ok'
   ///   status code. Use `GRPCStatus.isOk` or check the code directly.
-  public static let ok = GRPCStatus(code: .ok, message: "OK")
+  public static let ok = GRPCStatus(code: .ok, message: nil)
   /// "Internal server error" status.
-  public static let processingError = GRPCStatus(code: .internalError, message: "unknown error processing request")
+  public static let processingError = GRPCStatus(
+    code: .internalError,
+    message: "unknown error processing request"
+  )
 }
 
 extension GRPCStatus: Equatable {
@@ -61,9 +59,9 @@ extension GRPCStatus: Equatable {
 extension GRPCStatus: CustomStringConvertible {
   public var description: String {
     if let message = message {
-      return "\(code) (\(code.rawValue)): \(message)"
+      return "\(self.code): \(message)"
     } else {
-      return "\(code) (\(code.rawValue))"
+      return "\(self.code)"
     }
   }
 }
@@ -71,53 +69,70 @@ extension GRPCStatus: CustomStringConvertible {
 extension GRPCStatus {
   /// Status codes for gRPC operations (replicated from `status_code_enum.h` in the
   /// [gRPC core library](https://github.com/grpc/grpc)).
-  public enum Code: Int {
+  public struct Code: Hashable, CustomStringConvertible {
+    // `rawValue` must be an `Int` for API reasons and we don't need (or want) to store anything so
+    // wide, a `UInt8` is fine.
+    private let _rawValue: UInt8
+
+    public var rawValue: Int {
+      return Int(self._rawValue)
+    }
+
+    public init?(rawValue: Int) {
+      switch rawValue {
+      case 0 ... 16:
+        self._rawValue = UInt8(truncatingIfNeeded: rawValue)
+      default:
+        return nil
+      }
+    }
+
+    private init(_ code: UInt8) {
+      self._rawValue = code
+    }
+
     /// Not an error; returned on success.
-    case ok = 0
+    public static let ok = Code(0)
 
     /// The operation was cancelled (typically by the caller).
-    case cancelled = 1
+    public static let cancelled = Code(1)
 
     /// Unknown error. An example of where this error may be returned is if a
     /// Status value received from another address space belongs to an error-space
     /// that is not known in this address space. Also errors raised by APIs that
     /// do not return enough error information may be converted to this error.
-    case unknown = 2
+    public static let unknown = Code(2)
 
     /// Client specified an invalid argument. Note that this differs from
     /// FAILED_PRECONDITION. INVALID_ARGUMENT indicates arguments that are
     /// problematic regardless of the state of the system (e.g., a malformed file
     /// name).
-    case invalidArgument = 3
+    public static let invalidArgument = Code(3)
 
     /// Deadline expired before operation could complete. For operations that
     /// change the state of the system, this error may be returned even if the
     /// operation has completed successfully. For example, a successful response
     /// from a server could have been delayed long enough for the deadline to
     /// expire.
-    case deadlineExceeded = 4
+    public static let deadlineExceeded = Code(4)
 
     /// Some requested entity (e.g., file or directory) was not found.
-    case notFound = 5
+    public static let notFound = Code(5)
 
     /// Some entity that we attempted to create (e.g., file or directory) already
     /// exists.
-    case alreadyExists = 6
+    public static let alreadyExists = Code(6)
 
     /// The caller does not have permission to execute the specified operation.
     /// PERMISSION_DENIED must not be used for rejections caused by exhausting
     /// some resource (use RESOURCE_EXHAUSTED instead for those errors).
     /// PERMISSION_DENIED must not be used if the caller can not be identified
     /// (use UNAUTHENTICATED instead for those errors).
-    case permissionDenied = 7
-
-    /// The request does not have valid authentication credentials for the
-    /// operation.
-    case unauthenticated = 16
+    public static let permissionDenied = Code(7)
 
     /// Some resource has been exhausted, perhaps a per-user quota, or perhaps the
     /// entire file system is out of space.
-    case resourceExhausted = 8
+    public static let resourceExhausted = Code(8)
 
     /// Operation was rejected because the system is not in a state required for
     /// the operation's execution. For example, directory to be deleted may be
@@ -137,14 +152,14 @@ extension GRPCStatus {
     ///      REST Get/Update/Delete on a resource and the resource on the
     ///      server does not match the condition. E.g., conflicting
     ///      read-modify-write on the same resource.
-    case failedPrecondition = 9
+    public static let failedPrecondition = Code(9)
 
     /// The operation was aborted, typically due to a concurrency issue like
     /// sequencer check failures, transaction aborts, etc.
     ///
     /// See litmus test above for deciding between FAILED_PRECONDITION, ABORTED,
     /// and UNAVAILABLE.
-    case aborted = 10
+    public static let aborted = Code(10)
 
     /// Operation was attempted past the valid range. E.g., seeking or reading
     /// past end of file.
@@ -159,27 +174,69 @@ extension GRPCStatus {
     /// OUT_OF_RANGE. We recommend using OUT_OF_RANGE (the more specific error)
     /// when it applies so that callers who are iterating through a space can
     /// easily look for an OUT_OF_RANGE error to detect when they are done.
-    case outOfRange = 11
+    public static let outOfRange = Code(11)
 
     /// Operation is not implemented or not supported/enabled in this service.
-    case unimplemented = 12
+    public static let unimplemented = Code(12)
 
     /// Internal errors. Means some invariants expected by underlying System has
     /// been broken. If you see one of these errors, Something is very broken.
-    case internalError = 13
+    public static let internalError = Code(13)
 
     /// The service is currently unavailable. This is a most likely a transient
     /// condition and may be corrected by retrying with a backoff.
     ///
     /// See litmus test above for deciding between FAILED_PRECONDITION, ABORTED,
     /// and UNAVAILABLE.
-    case unavailable = 14
+    public static let unavailable = Code(14)
 
     /// Unrecoverable data loss or corruption.
-    case dataLoss = 15
+    public static let dataLoss = Code(15)
 
-    /// Force users to include a default branch:
-    case doNotUse = -1
+    /// The request does not have valid authentication credentials for the
+    /// operation.
+    public static let unauthenticated = Code(16)
+
+    public var description: String {
+      switch self {
+      case .ok:
+        return "ok (\(self._rawValue))"
+      case .cancelled:
+        return "cancelled (\(self._rawValue))"
+      case .unknown:
+        return "unknown (\(self._rawValue))"
+      case .invalidArgument:
+        return "invalid argument (\(self._rawValue))"
+      case .deadlineExceeded:
+        return "deadline exceeded (\(self._rawValue))"
+      case .notFound:
+        return "not found (\(self._rawValue))"
+      case .alreadyExists:
+        return "already exists (\(self._rawValue))"
+      case .permissionDenied:
+        return "permission denied (\(self._rawValue))"
+      case .resourceExhausted:
+        return "resource exhausted (\(self._rawValue))"
+      case .failedPrecondition:
+        return "failed precondition (\(self._rawValue))"
+      case .aborted:
+        return "aborted (\(self._rawValue))"
+      case .outOfRange:
+        return "out of range (\(self._rawValue))"
+      case .unimplemented:
+        return "unimplemented (\(self._rawValue))"
+      case .internalError:
+        return "internal error (\(self._rawValue))"
+      case .unavailable:
+        return "unavailable (\(self._rawValue))"
+      case .dataLoss:
+        return "data loss (\(self._rawValue))"
+      case .unauthenticated:
+        return "unauthenticated (\(self._rawValue))"
+      default:
+        return String(describing: self._rawValue)
+      }
+    }
   }
 }
 

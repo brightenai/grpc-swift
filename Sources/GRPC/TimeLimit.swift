@@ -26,14 +26,14 @@ import NIO
 ///   may therefore complete with `.deadlineExceeded` even if no time limit was set by the client.
 public struct TimeLimit: Equatable, CustomStringConvertible {
   // private but for shimming.
-  internal enum Wrapped: Equatable {
+  private enum Wrapped: Equatable {
     case none
     case timeout(TimeAmount)
     case deadline(NIODeadline)
   }
 
   // private but for shimming.
-  internal var wrapped: Wrapped
+  private var wrapped: Wrapped
 
   private init(_ wrapped: Wrapped) {
     self.wrapped = wrapped
@@ -61,7 +61,7 @@ public struct TimeLimit: Equatable, CustomStringConvertible {
   /// Return the timeout, if one was set.
   public var timeout: TimeAmount? {
     switch self.wrapped {
-    case .timeout(let timeout):
+    case let .timeout(timeout):
       return timeout
 
     case .none, .deadline:
@@ -72,30 +72,30 @@ public struct TimeLimit: Equatable, CustomStringConvertible {
   /// Return the deadline, if one was set.
   public var deadline: NIODeadline? {
     switch self.wrapped {
-    case .deadline(let deadline):
+    case let .deadline(deadline):
       return deadline
 
     case .none, .timeout:
       return nil
     }
-
   }
 }
 
 extension TimeLimit {
   /// Make a non-distant-future deadline from the give time limit.
+  @usableFromInline
   internal func makeDeadline() -> NIODeadline {
     switch self.wrapped {
     case .none:
       return .distantFuture
 
-    case .timeout(let timeout) where timeout.nanoseconds == .max:
+    case let .timeout(timeout) where timeout.nanoseconds == .max:
       return .distantFuture
 
-    case .timeout(let timeout):
+    case let .timeout(timeout):
       return .now() + timeout
 
-    case .deadline(let deadline):
+    case let .deadline(deadline):
       return deadline
     }
   }
@@ -105,16 +105,16 @@ extension TimeLimit {
     case .none:
       return "none"
 
-    case .timeout(let timeout) where timeout.nanoseconds == .max:
+    case let .timeout(timeout) where timeout.nanoseconds == .max:
       return "timeout=never"
 
-    case .timeout(let timeout):
+    case let .timeout(timeout):
       return "timeout=\(timeout.nanoseconds) nanoseconds"
 
-    case .deadline(let deadline) where deadline == .distantFuture:
+    case let .deadline(deadline) where deadline == .distantFuture:
       return "deadline=.distantFuture"
 
-    case .deadline(let deadline):
+    case let .deadline(deadline):
       return "deadline=\(deadline.uptimeNanoseconds) uptimeNanoseconds"
     }
   }

@@ -27,9 +27,9 @@ func splitPath(pathname: String) -> (dir: String, base: String, suffix: String) 
   var base = ""
   var suffix = ""
   #if swift(>=3.2)
-    let pathnameChars = pathname
+  let pathnameChars = pathname
   #else
-    let pathnameChars = pathname.characters
+  let pathnameChars = pathname.characters
   #endif
   for c in pathnameChars {
     if c == "/" {
@@ -44,9 +44,9 @@ func splitPath(pathname: String) -> (dir: String, base: String, suffix: String) 
     }
   }
   #if swift(>=3.2)
-    let validSuffix = suffix.isEmpty || suffix.first == "."
+  let validSuffix = suffix.isEmpty || suffix.first == "."
   #else
-    let validSuffix = suffix.isEmpty || suffix.characters.first == "."
+  let validSuffix = suffix.isEmpty || suffix.characters.first == "."
   #endif
   if !validSuffix {
     base += suffix
@@ -61,7 +61,8 @@ enum FileNaming: String {
   case DropPath
 }
 
-func outputFileName(component: String, fileDescriptor: FileDescriptor, fileNamingOption: FileNaming) -> String {
+func outputFileName(component: String, fileDescriptor: FileDescriptor,
+                    fileNamingOption: FileNaming) -> String {
   let ext = "." + component + ".swift"
   let pathParts = splitPath(pathname: fileDescriptor.name)
   switch fileNamingOption {
@@ -78,11 +79,23 @@ func outputFileName(component: String, fileDescriptor: FileDescriptor, fileNamin
 
 var generatedFiles: [String: Int] = [:]
 
-func uniqueOutputFileName(component: String, fileDescriptor: FileDescriptor, fileNamingOption: FileNaming) -> String {
-  let defaultName = outputFileName(component: component, fileDescriptor: fileDescriptor, fileNamingOption: fileNamingOption)
+func uniqueOutputFileName(
+  component: String,
+  fileDescriptor: FileDescriptor,
+  fileNamingOption: FileNaming
+) -> String {
+  let defaultName = outputFileName(
+    component: component,
+    fileDescriptor: fileDescriptor,
+    fileNamingOption: fileNamingOption
+  )
   if let count = generatedFiles[defaultName] {
     generatedFiles[defaultName] = count + 1
-    return outputFileName(component: "\(count)." + component, fileDescriptor: fileDescriptor, fileNamingOption: fileNamingOption)
+    return outputFileName(
+      component: "\(count)." + component,
+      fileDescriptor: fileDescriptor,
+      fileNamingOption: fileNamingOption
+    )
   } else {
     generatedFiles[defaultName] = 1
     return defaultName
@@ -91,7 +104,10 @@ func uniqueOutputFileName(component: String, fileDescriptor: FileDescriptor, fil
 
 func main() throws {
   // initialize responses
-  var response = Google_Protobuf_Compiler_CodeGeneratorResponse()
+  var response = Google_Protobuf_Compiler_CodeGeneratorResponse(
+    files: [],
+    supportedFeatures: [.proto3Optional]
+  )
 
   // read plugin input
   let rawRequest = try Stdin.readall()
@@ -103,13 +119,20 @@ func main() throws {
   let descriptorSet = DescriptorSet(protos: request.protoFile)
 
   // Only generate output for services.
-  for fileDescriptor in descriptorSet.files where !fileDescriptor.services.isEmpty {
-    let grpcFileName = uniqueOutputFileName(component: "grpc", fileDescriptor: fileDescriptor, fileNamingOption: options.fileNaming)
-    let grpcGenerator = Generator(fileDescriptor, options: options)
-    var grpcFile = Google_Protobuf_Compiler_CodeGeneratorResponse.File()
-    grpcFile.name = grpcFileName
-    grpcFile.content = grpcGenerator.code
-    response.file.append(grpcFile)
+  for name in request.fileToGenerate {
+    let fileDescriptor = descriptorSet.lookupFileDescriptor(protoName: name)
+    if !fileDescriptor.services.isEmpty {
+      let grpcFileName = uniqueOutputFileName(
+        component: "grpc",
+        fileDescriptor: fileDescriptor,
+        fileNamingOption: options.fileNaming
+      )
+      let grpcGenerator = Generator(fileDescriptor, options: options)
+      var grpcFile = Google_Protobuf_Compiler_CodeGeneratorResponse.File()
+      grpcFile.name = grpcFileName
+      grpcFile.content = grpcGenerator.code
+      response.file.append(grpcFile)
+    }
   }
 
   // return everything to the caller

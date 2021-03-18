@@ -13,187 +13,288 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import Logging
 import NIO
 import NIOHTTP2
 
-internal class GRPCIdleHandler: ChannelInboundHandler {
+internal final class GRPCIdleHandler: ChannelInboundHandler {
   typealias InboundIn = HTTP2Frame
+  typealias OutboundOut = HTTP2Frame
 
   /// The amount of time to wait before closing the channel when there are no active streams.
   private let idleTimeout: TimeAmount
 
-  /// The number of active streams.
-  private var activeStreams = 0
+  /// The ping handler.
+  private var pingHandler: PingHandler
 
-  /// The scheduled task which will close the channel.
-  private var scheduledIdle: Scheduled<Void>? = nil
+  /// The scheduled task which will close the connection after the keep-alive timeout has expired.
+  private var scheduledClose: Scheduled<Void>?
 
-  /// Client and server have slightly different behaviours; track which we are following.
-  private var mode: Mode
+  /// The scheduled task which will ping.
+  private var scheduledPing: RepeatedTask?
+
+  /// The mode we're operating in.
+  private let mode: Mode
+
+  /// A logger.
+  private let logger: Logger
+
+  private var context: ChannelHandlerContext?
 
   /// The mode of operation: the client tracks additional connection state in the connection
   /// manager.
   internal enum Mode {
-    case client(ConnectionManager)
+    case client(ConnectionManager, HTTP2StreamMultiplexer)
     case server
-  }
 
-  /// The current connection state.
-  private var state: State = .notReady
-
-  private enum State {
-    // We haven't marked the connection as "ready" yet.
-    case notReady
-
-    // The connection has been marked as "ready".
-    case ready
-
-    // We called `close` on the channel.
-    case closed
-  }
-
-  init(mode: Mode, idleTimeout: TimeAmount = .minutes(5)) {
-    self.mode = mode
-    self.idleTimeout = idleTimeout
-  }
-
-  func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-    switch self.state {
-    case .notReady, .ready:
-      if event is NIOHTTP2StreamCreatedEvent {
-        // We have a stream: don't go idle
-        self.scheduledIdle?.cancel()
-        self.scheduledIdle = nil
-
-        self.activeStreams += 1
-      } else if event is StreamClosedEvent {
-        self.activeStreams -= 1
-        // No active streams: go idle soon.
-        if self.activeStreams == 0 {
-          self.scheduleIdleTimeout(context: context)
-        }
-      } else if event is ConnectionIdledEvent {
-        // Force idle (closing) because we received a `ConnectionIdledEvent` from a keepalive handler
-        self.idle(context: context, force: true)
+    var connectionManager: ConnectionManager? {
+      switch self {
+      case let .client(manager, _):
+        return manager
+      case .server:
+        return nil
       }
-
-    case .closed:
-      ()
     }
-
-    context.fireUserInboundEventTriggered(event)
   }
 
-  func channelActive(context: ChannelHandlerContext) {
-    switch (self.mode, self.state) {
-    // The client should become active: we'll only schedule the idling when the channel
-    // becomes 'ready'.
-    case (.client(let manager), .notReady):
-      manager.channelActive(channel: context.channel)
+  /// The current state.
+  private var stateMachine: GRPCIdleHandlerStateMachine
 
-    case (.server, .notReady),
-         (_, .ready),
-         (_, .closed):
-      ()
+  init(
+    connectionManager: ConnectionManager,
+    multiplexer: HTTP2StreamMultiplexer,
+    idleTimeout: TimeAmount,
+    keepalive configuration: ClientConnectionKeepalive,
+    logger: Logger
+  ) {
+    self.mode = .client(connectionManager, multiplexer)
+    self.idleTimeout = idleTimeout
+    self.stateMachine = .init(role: .client, logger: logger)
+    self.pingHandler = PingHandler(
+      pingCode: 5,
+      interval: configuration.interval,
+      timeout: configuration.timeout,
+      permitWithoutCalls: configuration.permitWithoutCalls,
+      maximumPingsWithoutData: configuration.maximumPingsWithoutData,
+      minimumSentPingIntervalWithoutData: configuration.minimumSentPingIntervalWithoutData
+    )
+    self.logger = logger
+  }
+
+  init(
+    idleTimeout: TimeAmount,
+    keepalive configuration: ServerConnectionKeepalive,
+    logger: Logger
+  ) {
+    self.mode = .server
+    self.stateMachine = .init(role: .server, logger: logger)
+    self.idleTimeout = idleTimeout
+    self.pingHandler = PingHandler(
+      pingCode: 10,
+      interval: configuration.interval,
+      timeout: configuration.timeout,
+      permitWithoutCalls: configuration.permitWithoutCalls,
+      maximumPingsWithoutData: configuration.maximumPingsWithoutData,
+      minimumSentPingIntervalWithoutData: configuration.minimumSentPingIntervalWithoutData,
+      minimumReceivedPingIntervalWithoutData: configuration.minimumReceivedPingIntervalWithoutData,
+      maximumPingStrikes: configuration.maximumPingStrikes
+    )
+    self.logger = logger
+  }
+
+  private func sendGoAway(lastStreamID streamID: HTTP2StreamID) {
+    guard let context = self.context else {
+      return
     }
 
-    context.fireChannelActive()
+    let frame = HTTP2Frame(
+      streamID: .rootStream,
+      payload: .goAway(lastStreamID: streamID, errorCode: .noError, opaqueData: nil)
+    )
+
+    context.writeAndFlush(self.wrapOutboundOut(frame), promise: nil)
+  }
+
+  private func perform(operations: GRPCIdleHandlerStateMachine.Operations) {
+    // Prod the connection manager.
+    if let event = operations.connectionManagerEvent, let manager = self.mode.connectionManager {
+      switch event {
+      case .idle:
+        manager.idle()
+      case .inactive:
+        manager.channelInactive()
+      case .ready:
+        manager.ready()
+      case .quiescing:
+        manager.beginQuiescing()
+      }
+    }
+
+    // Handle idle timeout creation/cancellation.
+    if let idleTask = operations.idleTask {
+      switch idleTask {
+      case let .cancel(task):
+        task.cancel()
+
+      case .schedule:
+        if self.idleTimeout != .nanoseconds(.max), let context = self.context {
+          let task = context.eventLoop.scheduleTask(in: self.idleTimeout) {
+            self.idleTimeoutFired()
+          }
+          self.perform(operations: self.stateMachine.scheduledIdleTimeoutTask(task))
+        }
+      }
+    }
+
+    // Send a GOAWAY frame.
+    if let streamID = operations.sendGoAwayWithLastPeerInitiatedStreamID {
+      let goAwayFrame = HTTP2Frame(
+        streamID: .rootStream,
+        payload: .goAway(lastStreamID: streamID, errorCode: .noError, opaqueData: nil)
+      )
+      self.context?.writeAndFlush(self.wrapOutboundOut(goAwayFrame), promise: nil)
+    }
+
+    // Close the channel, if necessary.
+    if operations.shouldCloseChannel {
+      self.context?.close(mode: .all, promise: nil)
+    }
+  }
+
+  private func handlePingAction(_ action: PingHandler.Action) {
+    switch action {
+    case .none:
+      ()
+
+    case .cancelScheduledTimeout:
+      self.scheduledClose?.cancel()
+      self.scheduledClose = nil
+
+    case let .schedulePing(delay, timeout):
+      self.schedulePing(in: delay, timeout: timeout)
+
+    case let .reply(framePayload):
+      let frame = HTTP2Frame(streamID: .rootStream, payload: framePayload)
+      self.context?.writeAndFlush(self.wrapOutboundOut(frame), promise: nil)
+    }
+  }
+
+  private func schedulePing(in delay: TimeAmount, timeout: TimeAmount) {
+    guard delay != .nanoseconds(.max) else {
+      return
+    }
+
+    self.scheduledPing = self.context?.eventLoop.scheduleRepeatedTask(
+      initialDelay: delay,
+      delay: delay
+    ) { _ in
+      self.handlePingAction(self.pingHandler.pingFired())
+      // `timeout` is less than `interval`, guaranteeing that the close task
+      // will be fired before a new ping is triggered.
+      assert(timeout < delay, "`timeout` must be less than `interval`")
+      self.scheduleClose(in: timeout)
+    }
+  }
+
+  private func scheduleClose(in timeout: TimeAmount) {
+    self.scheduledClose = self.context?.eventLoop.scheduleTask(in: timeout) {
+      self.perform(operations: self.stateMachine.shutdownNow())
+    }
+  }
+
+  private func idleTimeoutFired() {
+    self.perform(operations: self.stateMachine.idleTimeoutTaskFired())
+  }
+
+  func handlerAdded(context: ChannelHandlerContext) {
+    self.context = context
   }
 
   func handlerRemoved(context: ChannelHandlerContext) {
-    self.scheduledIdle?.cancel()
+    self.context = nil
+  }
+
+  func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+    if let created = event as? NIOHTTP2StreamCreatedEvent {
+      self.perform(operations: self.stateMachine.streamCreated(withID: created.streamID))
+      self.handlePingAction(self.pingHandler.streamCreated())
+      context.fireUserInboundEventTriggered(event)
+    } else if let closed = event as? StreamClosedEvent {
+      self.perform(operations: self.stateMachine.streamClosed(withID: closed.streamID))
+      self.handlePingAction(self.pingHandler.streamClosed())
+      context.fireUserInboundEventTriggered(event)
+    } else if event is ChannelShouldQuiesceEvent {
+      self.perform(operations: self.stateMachine.initiateGracefulShutdown())
+      // Swallow this event.
+    } else {
+      context.fireUserInboundEventTriggered(event)
+    }
+  }
+
+  func errorCaught(context: ChannelHandlerContext, error: Error) {
+    // No state machine action here.
+    self.mode.connectionManager?.channelError(error)
+    context.fireErrorCaught(error)
+  }
+
+  func channelActive(context: ChannelHandlerContext) {
+    // No state machine action here.
+    switch self.mode {
+    case let .client(connectionManager, multiplexer):
+      connectionManager.channelActive(channel: context.channel, multiplexer: multiplexer)
+    case .server:
+      ()
+    }
+    context.fireChannelActive()
   }
 
   func channelInactive(context: ChannelHandlerContext) {
-    self.scheduledIdle?.cancel()
-    self.scheduledIdle = nil
-
-    switch (self.mode, self.state) {
-    case (.client(let manager), .notReady),
-         (.client(let manager), .ready):
-      manager.channelInactive()
-
-    case (.server, .notReady),
-         (.server, .ready),
-         (_, .closed):
-      ()
-
-    }
-
+    self.perform(operations: self.stateMachine.channelInactive())
+    self.scheduledPing?.cancel()
+    self.scheduledClose?.cancel()
+    self.scheduledPing = nil
+    self.scheduledClose = nil
     context.fireChannelInactive()
   }
 
   func channelRead(context: ChannelHandlerContext, data: NIOAny) {
     let frame = self.unwrapInboundIn(data)
 
-    if frame.streamID == .rootStream {
-      switch (self.state, frame.payload) {
-      // We only care about SETTINGS as long as we are in state `.notReady`.
-      case (.notReady, .settings):
-        self.state = .ready
-
-        switch self.mode {
-        case .client(let manager):
-          let remoteAddressDescription = context.channel.remoteAddress.map { "\($0)" } ?? "n/a"
-          manager.logger.info("gRPC connection ready", metadata: [
-            "remote_address": "\(remoteAddressDescription)",
-            "event_loop": "\(context.eventLoop)"
-          ])
-
-          // Let the manager know we're ready.
-          manager.ready()
-
-        case .server:
-          ()
-        }
-
-        // Start the idle timeout.
-        self.scheduleIdleTimeout(context: context)
-
-      case (.notReady, .goAway),
-           (.ready, .goAway):
-        self.idle(context: context)
-
-      default:
-        ()
-      }
+    switch frame.payload {
+    case .goAway:
+      self.perform(operations: self.stateMachine.receiveGoAway())
+    case let .settings(.settings(settings)):
+      self.perform(operations: self.stateMachine.receiveSettings(settings))
+    case let .ping(data, ack):
+      self.handlePingAction(self.pingHandler.read(pingData: data, ack: ack))
+    default:
+      // We're not interested in other events.
+      ()
     }
 
     context.fireChannelRead(data)
   }
+}
 
-  private func scheduleIdleTimeout(context: ChannelHandlerContext) {
-    guard self.activeStreams == 0 else {
-      return
-    }
-
-    self.scheduledIdle = context.eventLoop.scheduleTask(in: self.idleTimeout) {
-      self.idle(context: context)
-    }
-  }
-
-  private func idle(context: ChannelHandlerContext, force: Bool = false) {
-    // Don't idle if there are active streams unless we manually request
-    // example: keepalive handler sends a `ConnectionIdledEvent` event
-    guard self.activeStreams == 0 || force else {
-      return
-    }
-
-    switch self.state {
-    case .notReady, .ready:
-      self.state = .closed
-      switch self.mode {
-      case .client(let manager):
-        manager.idle()
-      case .server:
-        ()
-      }
-      context.close(mode: .all, promise: nil)
-
-    // We need to guard against double closure here. We may go idle as a result of receiving a
-    // GOAWAY frame or because our scheduled idle timeout fired. 
-    case .closed:
-      ()
+extension HTTP2SettingsParameter {
+  internal var loggingMetadataKey: String {
+    switch self {
+    case .headerTableSize:
+      return "h2_settings_header_table_size"
+    case .enablePush:
+      return "h2_settings_enable_push"
+    case .maxConcurrentStreams:
+      return "h2_settings_max_concurrent_streams"
+    case .initialWindowSize:
+      return "h2_settings_initial_window_size"
+    case .maxFrameSize:
+      return "h2_settings_max_frame_size"
+    case .maxHeaderListSize:
+      return "h2_settings_max_header_list_size"
+    case .enableConnectProtocol:
+      return "h2_settings_enable_connect_protocol"
+    default:
+      return String(describing: self)
     }
   }
 }

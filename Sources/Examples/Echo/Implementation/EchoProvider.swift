@@ -13,61 +13,76 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import Foundation
-import NIO
-import GRPC
 import EchoModel
+import Foundation
+import GRPC
+import NIO
+import SwiftProtobuf
 
 public class EchoProvider: Echo_EchoProvider {
-  public init() {}
+  public let interceptors: Echo_EchoServerInterceptorFactoryProtocol?
 
-  public func get(request: Echo_EchoRequest, context: StatusOnlyCallContext) -> EventLoopFuture<Echo_EchoResponse> {
-    var response = Echo_EchoResponse()
-    response.text = "Swift echo get: " + request.text
+  public init(interceptors: Echo_EchoServerInterceptorFactoryProtocol? = nil) {
+    self.interceptors = interceptors
+  }
+
+  public func get(
+    request: Echo_EchoRequest,
+    context: StatusOnlyCallContext
+  ) -> EventLoopFuture<Echo_EchoResponse> {
+    let response = Echo_EchoResponse.with {
+      $0.text = "Swift echo get: " + request.text
+    }
     return context.eventLoop.makeSucceededFuture(response)
   }
 
-  public func expand(request: Echo_EchoRequest, context: StreamingResponseCallContext<Echo_EchoResponse>) -> EventLoopFuture<GRPCStatus> {
-    var endOfSendOperationQueue = context.eventLoop.makeSucceededFuture(())
-    let parts = request.text.components(separatedBy: " ")
-    for (i, part) in parts.enumerated() {
-      var response = Echo_EchoResponse()
-      response.text = "Swift echo expand (\(i)): \(part)"
-      endOfSendOperationQueue = endOfSendOperationQueue.flatMap { context.sendResponse(response) }
+  public func expand(
+    request: Echo_EchoRequest,
+    context: StreamingResponseCallContext<Echo_EchoResponse>
+  ) -> EventLoopFuture<GRPCStatus> {
+    let responses = request.text.components(separatedBy: " ").lazy.enumerated().map { i, part in
+      Echo_EchoResponse.with {
+        $0.text = "Swift echo expand (\(i)): \(part)"
+      }
     }
-    return endOfSendOperationQueue.map { GRPCStatus.ok }
+
+    context.sendResponses(responses, promise: nil)
+    return context.eventLoop.makeSucceededFuture(.ok)
   }
 
-  public func collect(context: UnaryResponseCallContext<Echo_EchoResponse>) -> EventLoopFuture<(StreamEvent<Echo_EchoRequest>) -> Void> {
+  public func collect(
+    context: UnaryResponseCallContext<Echo_EchoResponse>
+  ) -> EventLoopFuture<(StreamEvent<Echo_EchoRequest>) -> Void> {
     var parts: [String] = []
     return context.eventLoop.makeSucceededFuture({ event in
       switch event {
-      case .message(let message):
+      case let .message(message):
         parts.append(message.text)
 
       case .end:
-        var response = Echo_EchoResponse()
-        response.text = "Swift echo collect: " + parts.joined(separator: " ")
+        let response = Echo_EchoResponse.with {
+          $0.text = "Swift echo collect: " + parts.joined(separator: " ")
+        }
         context.responsePromise.succeed(response)
       }
     })
   }
 
-  public func update(context: StreamingResponseCallContext<Echo_EchoResponse>) -> EventLoopFuture<(StreamEvent<Echo_EchoRequest>) -> Void> {
-    var endOfSendOperationQueue = context.eventLoop.makeSucceededFuture(())
+  public func update(
+    context: StreamingResponseCallContext<Echo_EchoResponse>
+  ) -> EventLoopFuture<(StreamEvent<Echo_EchoRequest>) -> Void> {
     var count = 0
     return context.eventLoop.makeSucceededFuture({ event in
       switch event {
-      case .message(let message):
-        var response = Echo_EchoResponse()
-        response.text = "Swift echo update (\(count)): \(message.text)"
-        endOfSendOperationQueue = endOfSendOperationQueue.flatMap { context.sendResponse(response) }
+      case let .message(message):
+        let response = Echo_EchoResponse.with {
+          $0.text = "Swift echo update (\(count)): \(message.text)"
+        }
         count += 1
+        context.sendResponse(response, promise: nil)
 
       case .end:
-        endOfSendOperationQueue
-          .map { GRPCStatus.ok }
-          .cascade(to: context.statusPromise)
+        context.statusPromise.succeed(.ok)
       }
     })
   }

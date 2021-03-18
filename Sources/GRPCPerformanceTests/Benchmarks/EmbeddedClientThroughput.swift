@@ -14,12 +14,11 @@
  * limitations under the License.
  */
 import struct Foundation.Data
-import NIO
-import NIOHTTP2
-import NIOHPACK
 import GRPC
-import EchoModel
 import Logging
+import NIO
+import NIOHPACK
+import NIOHTTP2
 
 /// Tests the throughput on the client side by firing a unary request through an embedded channel
 /// and writing back enough gRPC as HTTP/2 frames to get through the state machine.
@@ -64,21 +63,23 @@ class EmbeddedClientThroughput: Benchmark {
 
     let serializedResponse = try response.serializedData()
     var buffer = ByteBufferAllocator().buffer(capacity: serializedResponse.count + 5)
-    buffer.writeInteger(UInt8(0))  // compression byte
+    buffer.writeInteger(UInt8(0)) // compression byte
     buffer.writeInteger(UInt32(serializedResponse.count))
-    buffer.writeBytes(serializedResponse)
+    buffer.writeContiguousBytes(serializedResponse)
 
     self.responseDataChunks = []
-    while buffer.readableBytes > 0, let slice = buffer.readSlice(length: min(maximumResponseFrameSize, buffer.readableBytes)) {
+    while buffer.readableBytes > 0,
+      let slice = buffer.readSlice(length: min(maximumResponseFrameSize, buffer.readableBytes)) {
       self.responseDataChunks.append(slice)
     }
   }
 
-  func tearDown() throws {
-  }
+  func tearDown() throws {}
 
-  func run() throws {
-    for _ in 0..<self.requestCount {
+  func run() throws -> Int {
+    var messages = 0
+
+    for _ in 0 ..< self.requestCount {
       let channel = EmbeddedChannel()
 
       try channel._configureForEmbeddedThroughputTest(
@@ -93,38 +94,42 @@ class EmbeddedClientThroughput: Benchmark {
 
       // Write the request parts.
       try channel.writeOutbound(_GRPCClientRequestPart<Echo_EchoRequest>.head(self.requestHead))
-      try channel.writeOutbound(_GRPCClientRequestPart<Echo_EchoRequest>.message(.init(self.request, compressed: false)))
+      try channel.writeOutbound(
+        _GRPCClientRequestPart<Echo_EchoRequest>.message(.init(self.request, compressed: false))
+      )
       try channel.writeOutbound(_GRPCClientRequestPart<Echo_EchoRequest>.end)
+      messages += 1
 
       // Read out the request frames.
       var requestFrames = 0
-      while let _ = try channel.readOutbound(as: HTTP2Frame.self) {
+      while let _ = try channel.readOutbound(as: HTTP2Frame.FramePayload.self) {
         requestFrames += 1
       }
-      precondition(requestFrames == 3)  // headers, data, empty data (end-stream)
+      precondition(requestFrames == 3) // headers, data, empty data (end-stream)
 
       // Okay, let's build a response.
 
       // Required headers.
       let responseHeaders: HPACKHeaders = [
         ":status": "200",
-        "content-type": "application/grpc+proto"
+        "content-type": "application/grpc+proto",
       ]
-      let headerFrame = HTTP2Frame(streamID: .init(1), payload: .headers(.init(headers: responseHeaders)))
+
+      let headerFrame = HTTP2Frame.FramePayload.headers(.init(headers: responseHeaders))
       try channel.writeInbound(headerFrame)
 
       // The response data.
       for chunk in self.responseDataChunks {
-        let frame = HTTP2Frame(streamID: 1, payload: .data(.init(data: .byteBuffer(chunk))))
+        let frame = HTTP2Frame.FramePayload.data(.init(data: .byteBuffer(chunk)))
         try channel.writeInbound(frame)
       }
 
       // Required trailers.
       let responseTrailers: HPACKHeaders = [
         "grpc-status": "0",
-        "grpc-message": "ok"
+        "grpc-message": "ok",
       ]
-      let trailersFrame = HTTP2Frame(streamID: .init(1), payload: .headers(.init(headers: responseTrailers)))
+      let trailersFrame = HTTP2Frame.FramePayload.headers(.init(headers: responseTrailers))
       try channel.writeInbound(trailersFrame)
 
       // And read them back out.
@@ -135,5 +140,7 @@ class EmbeddedClientThroughput: Benchmark {
 
       precondition(responseParts == 4, "received \(responseParts) response parts")
     }
+
+    return messages
   }
 }

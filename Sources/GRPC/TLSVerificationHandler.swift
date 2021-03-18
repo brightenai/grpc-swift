@@ -14,17 +14,32 @@
  * limitations under the License.
  */
 import Foundation
+import Logging
 import NIO
 import NIOSSL
 import NIOTLS
-import Logging
 
 /// Application protocol identifiers for ALPN.
-internal enum GRPCApplicationProtocolIdentifier: String, CaseIterable {
-  // This is not in the IANA ALPN protocol ID registry, but may be used by servers to indicate that
-  // they serve only gRPC traffic. It is part of the gRPC core implementation.
-  case gRPC = "grpc-exp"
-  case h2 = "h2"
+internal enum GRPCApplicationProtocolIdentifier {
+  static let gRPC = "grpc-exp"
+  static let h2 = "h2"
+  static let http1_1 = "http/1.1"
+
+  static let client = [gRPC, h2]
+  static let server = [gRPC, h2, http1_1]
+
+  static func isHTTP2Like(_ value: String) -> Bool {
+    switch value {
+    case self.gRPC, self.h2:
+      return true
+    default:
+      return false
+    }
+  }
+
+  static func isHTTP1(_ value: String) -> Bool {
+    return value == self.http1_1
+  }
 }
 
 internal class TLSVerificationHandler: ChannelInboundHandler, RemovableChannelHandler {
@@ -38,7 +53,7 @@ internal class TLSVerificationHandler: ChannelInboundHandler, RemovableChannelHa
   func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
     if let tlsEvent = event as? TLSUserEvent {
       switch tlsEvent {
-      case .handshakeCompleted(negotiatedProtocol: .some(let `protocol`)):
+      case let .handshakeCompleted(negotiatedProtocol: .some(`protocol`)):
         self.logger.debug("TLS handshake completed, negotiated protocol: \(`protocol`)")
       case .handshakeCompleted(negotiatedProtocol: nil):
         self.logger.debug("TLS handshake completed, no protocol negotiated")

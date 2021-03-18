@@ -13,8 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import NIOHTTP2
 
-/// A `ConnectionIdledEvent` is fired whenever a connection has expired (keepalive).
-struct ConnectionIdledEvent: Hashable {
+extension Array {
+  internal subscript(checked index: Index) -> Element? {
+    if self.indices.contains(index) {
+      return self[index]
+    } else {
+      return nil
+    }
+  }
 }

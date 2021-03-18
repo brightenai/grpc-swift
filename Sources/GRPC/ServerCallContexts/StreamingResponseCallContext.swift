@@ -14,84 +14,223 @@
  * limitations under the License.
  */
 import Foundation
-import SwiftProtobuf
-import NIO
-import NIOHTTP1
 import Logging
+import NIO
+import NIOHPACK
+import NIOHTTP1
+import SwiftProtobuf
 
-/// Abstract base class exposing a method to send multiple messages over the wire and a promise for the final RPC status.
-///
-/// - When `statusPromise` is fulfilled, the call is closed and the provided status transmitted.
-/// - If `statusPromise` is failed and the error is of type `GRPCStatusTransformable`,
-///   the result of `error.asGRPCStatus()` will be returned to the client.
-/// - If `error.asGRPCStatus()` is not available, `GRPCStatus.processingError` is returned to the client.
+/// An abstract base class for a context provided to handlers for RPCs which may return multiple
+/// responses, i.e. server streaming and bidirectional streaming RPCs.
 open class StreamingResponseCallContext<ResponsePayload>: ServerCallContextBase {
-  typealias WrappedResponse = _GRPCServerResponsePart<ResponsePayload>
-
+  /// A promise for the `GRPCStatus`, the end of the response stream. This must be completed by
+  /// bidirectional streaming RPC handlers to end the RPC.
+  ///
+  /// Note that while this is also present for server streaming RPCs, it is not necessary to
+  /// complete this promise: instead, an `EventLoopFuture<GRPCStatus>` must be returned from the
+  /// handler.
   public let statusPromise: EventLoopPromise<GRPCStatus>
 
-  public override init(eventLoop: EventLoop, request: HTTPRequestHead, logger: Logger) {
+  @available(*, deprecated, renamed: "init(eventLoop:headers:logger:userInfo:closeFuture:)")
+  public convenience init(
+    eventLoop: EventLoop,
+    headers: HPACKHeaders,
+    logger: Logger,
+    userInfo: UserInfo = UserInfo()
+  ) {
+    self.init(
+      eventLoop: eventLoop,
+      headers: headers,
+      logger: logger,
+      userInfoRef: .init(userInfo),
+      closeFuture: eventLoop.makeFailedFuture(GRPCStatus.closeFutureNotImplemented)
+    )
+  }
+
+  public convenience init(
+    eventLoop: EventLoop,
+    headers: HPACKHeaders,
+    logger: Logger,
+    userInfo: UserInfo = UserInfo(),
+    closeFuture: EventLoopFuture<Void>
+  ) {
+    self.init(
+      eventLoop: eventLoop,
+      headers: headers,
+      logger: logger,
+      userInfoRef: .init(userInfo),
+      closeFuture: closeFuture
+    )
+  }
+
+  @inlinable
+  override internal init(
+    eventLoop: EventLoop,
+    headers: HPACKHeaders,
+    logger: Logger,
+    userInfoRef: Ref<UserInfo>,
+    closeFuture: EventLoopFuture<Void>
+  ) {
     self.statusPromise = eventLoop.makePromise()
-    super.init(eventLoop: eventLoop, request: request, logger: logger)
+    super.init(
+      eventLoop: eventLoop,
+      headers: headers,
+      logger: logger,
+      userInfoRef: userInfoRef,
+      closeFuture: closeFuture
+    )
   }
 
   /// Send a response to the client.
   ///
-  /// - Parameter message: The message to send to the client.
-  /// - Parameter compression: Whether compression should be used for this response. If compression
-  ///   is enabled in the call context, the value passed here takes precedence. Defaults to deferring
-  ///   to the value set on the call context.
-  open func sendResponse(_ message: ResponsePayload, compression: Compression = .deferToCallDefault) -> EventLoopFuture<Void> {
+  /// - Parameters:
+  ///   - message: The message to send to the client.
+  ///   - compression: Whether compression should be used for this response. If compression
+  ///     is enabled in the call context, the value passed here takes precedence. Defaults to
+  ///     deferring to the value set on the call context.
+  ///   - promise: A promise to complete once the message has been sent.
+  open func sendResponse(
+    _ message: ResponsePayload,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) {
     fatalError("needs to be overridden")
+  }
+
+  /// Send a response to the client.
+  ///
+  /// - Parameters:
+  ///   - message: The message to send to the client.
+  ///   - compression: Whether compression should be used for this response. If compression
+  ///     is enabled in the call context, the value passed here takes precedence. Defaults to
+  ///     deferring to the value set on the call context.
+  open func sendResponse(
+    _ message: ResponsePayload,
+    compression: Compression = .deferToCallDefault
+  ) -> EventLoopFuture<Void> {
+    let promise = self.eventLoop.makePromise(of: Void.self)
+    self.sendResponse(message, compression: compression, promise: promise)
+    return promise.futureResult
+  }
+
+  /// Sends a sequence of responses to the client.
+  /// - Parameters:
+  ///   - messages: The messages to send to the client.
+  ///   - compression: Whether compression should be used for this response. If compression
+  ///     is enabled in the call context, the value passed here takes precedence. Defaults to
+  ///     deferring to the value set on the call context.
+  ///   - promise: A promise to complete once the messages have been sent.
+  open func sendResponses<Messages: Sequence>(
+    _ messages: Messages,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) where Messages.Element == ResponsePayload {
+    fatalError("needs to be overridden")
+  }
+
+  /// Sends a sequence of responses to the client.
+  /// - Parameters:
+  ///   - messages: The messages to send to the client.
+  ///   - compression: Whether compression should be used for this response. If compression
+  ///     is enabled in the call context, the value passed here takes precedence. Defaults to
+  ///     deferring to the value set on the call context.
+  open func sendResponses<Messages: Sequence>(
+    _ messages: Messages,
+    compression: Compression = .deferToCallDefault
+  ) -> EventLoopFuture<Void> where Messages.Element == ResponsePayload {
+    let promise = self.eventLoop.makePromise(of: Void.self)
+    self.sendResponses(messages, compression: compression, promise: promise)
+    return promise.futureResult
   }
 }
 
-/// Concrete implementation of `StreamingResponseCallContext` used by our generated code.
-open class StreamingResponseCallContextImpl<ResponsePayload>: StreamingResponseCallContext<ResponsePayload> {
-  public let channel: Channel
+/// A concrete implementation of `StreamingResponseCallContext` used internally.
+@usableFromInline
+internal final class _StreamingResponseCallContext<Request, Response>:
+  StreamingResponseCallContext<Response> {
+  @usableFromInline
+  internal let _sendResponse: (Response, MessageMetadata, EventLoopPromise<Void>?) -> Void
 
-  /// - Parameters:
-  ///   - channel: The NIO channel the call is handled on.
-  ///   - request: The headers provided with this call.
-  ///   - errorDelegate: Provides a means for transforming status promise failures to `GRPCStatusTransformable` before
-  ///     sending them to the client.
-  ///
-  ///     Note: `errorDelegate` is not called for status promise that are `succeeded` with a non-OK status.
-  public init(channel: Channel, request: HTTPRequestHead, errorDelegate: ServerErrorDelegate?, logger: Logger) {
-    self.channel = channel
+  @usableFromInline
+  internal let _compressionEnabledOnServer: Bool
 
-    super.init(eventLoop: channel.eventLoop, request: request, logger: logger)
+  @inlinable
+  internal init(
+    eventLoop: EventLoop,
+    headers: HPACKHeaders,
+    logger: Logger,
+    userInfoRef: Ref<UserInfo>,
+    compressionIsEnabled: Bool,
+    closeFuture: EventLoopFuture<Void>,
+    sendResponse: @escaping (Response, MessageMetadata, EventLoopPromise<Void>?) -> Void
+  ) {
+    self._sendResponse = sendResponse
+    self._compressionEnabledOnServer = compressionIsEnabled
+    super.init(
+      eventLoop: eventLoop,
+      headers: headers,
+      logger: logger,
+      userInfoRef: userInfoRef,
+      closeFuture: closeFuture
+    )
+  }
 
-    statusPromise.futureResult
-      .map {
-        GRPCStatusAndMetadata(status: $0, metadata: nil)
+  @inlinable
+  internal func shouldCompress(_ compression: Compression) -> Bool {
+    guard self._compressionEnabledOnServer else {
+      return false
+    }
+    return compression.isEnabled(callDefault: self.compressionEnabled)
+  }
+
+  @inlinable
+  override func sendResponse(
+    _ message: Response,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) {
+    if self.eventLoop.inEventLoop {
+      let compress = self.shouldCompress(compression)
+      self._sendResponse(message, .init(compress: compress, flush: true), promise)
+    } else {
+      self.eventLoop.execute {
+        let compress = self.shouldCompress(compression)
+        self._sendResponse(message, .init(compress: compress, flush: true), promise)
       }
-      // Ensure that any error provided can be transformed to `GRPCStatus`, using "internal server error" as a fallback.
-      .recover { [weak errorDelegate] error in
-        errorDelegate?.observeRequestHandlerError(error, request: request)
-        
-        if let transformed: GRPCStatusAndMetadata = errorDelegate?.transformRequestHandlerError(error, request: request) {
-          return transformed
-        }
-        
-        if let grpcStatusTransformable = error as? GRPCStatusTransformable {
-          return GRPCStatusAndMetadata(status: grpcStatusTransformable.makeGRPCStatus(), metadata: nil)
-        }
-
-        return GRPCStatusAndMetadata(status: .processingError, metadata: nil)
-      }
-      // Finish the call by returning the final status.
-      .whenSuccess { statusAndMetadata in
-        if let metadata = statusAndMetadata.metadata {
-          self.trailingMetadata.add(contentsOf: metadata)
-        }
-        self.channel.writeAndFlush(NIOAny(WrappedResponse.statusAndTrailers(statusAndMetadata.status, self.trailingMetadata)), promise: nil)
     }
   }
 
-  open override func sendResponse(_ message: ResponsePayload, compression: Compression = .deferToCallDefault) -> EventLoopFuture<Void> {
-    let messageContext = _MessageContext(message, compressed: compression.isEnabled(callDefault: self.compressionEnabled))
-    return self.channel.writeAndFlush(NIOAny(WrappedResponse.message(messageContext)))
+  @inlinable
+  override func sendResponses<Messages: Sequence>(
+    _ messages: Messages,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) where Response == Messages.Element {
+    if self.eventLoop.inEventLoop {
+      self._sendResponses(messages, compression: compression, promise: promise)
+    } else {
+      self.eventLoop.execute {
+        self._sendResponses(messages, compression: compression, promise: promise)
+      }
+    }
+  }
+
+  @inlinable
+  internal func _sendResponses<Messages: Sequence>(
+    _ messages: Messages,
+    compression: Compression,
+    promise: EventLoopPromise<Void>?
+  ) where Response == Messages.Element {
+    let compress = self.shouldCompress(compression)
+    var iterator = messages.makeIterator()
+    var next = iterator.next()
+
+    while let current = next {
+      next = iterator.next()
+      // Attach the promise, if present, to the last message.
+      let isLast = next == nil
+      self._sendResponse(current, .init(compress: compress, flush: isLast), isLast ? promise : nil)
+    }
   }
 }
 
@@ -101,8 +240,21 @@ open class StreamingResponseCallContextImpl<ResponsePayload>: StreamingResponseC
 open class StreamingResponseCallContextTestStub<ResponsePayload>: StreamingResponseCallContext<ResponsePayload> {
   open var recordedResponses: [ResponsePayload] = []
 
-  open override func sendResponse(_ message: ResponsePayload, compression: Compression = .deferToCallDefault) -> EventLoopFuture<Void> {
-    recordedResponses.append(message)
-    return eventLoop.makeSucceededFuture(())
+  override open func sendResponse(
+    _ message: ResponsePayload,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) {
+    self.recordedResponses.append(message)
+    promise?.succeed(())
+  }
+
+  override open func sendResponses<Messages: Sequence>(
+    _ messages: Messages,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) where ResponsePayload == Messages.Element {
+    self.recordedResponses.append(contentsOf: messages)
+    promise?.succeed(())
   }
 }

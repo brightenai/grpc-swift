@@ -14,22 +14,24 @@
  * limitations under the License.
  */
 import Foundation
+import Logging
 import NIO
+import NIOExtras
 import NIOHTTP1
 import NIOHTTP2
 import NIOSSL
-import Logging
+import NIOTransportServices
 
 /// Wrapper object to manage the lifecycle of a gRPC server.
 ///
 /// The pipeline is configured in three stages detailed below. Note: handlers marked with
 /// a '*' are responsible for handling errors.
 ///
-/// 1. Initial stage, prior to HTTP protocol detection.
+/// 1. Initial stage, prior to pipeline configuration.
 ///
-///                           ┌───────────────────────────┐
-///                           │   HTTPProtocolSwitcher*   │
-///                           └─▲───────────────────────┬─┘
+///                        ┌─────────────────────────────────┐
+///                        │ GRPCServerPipelineConfigurator* │
+///                        └────▲───────────────────────┬────┘
 ///                   ByteBuffer│                       │ByteBuffer
 ///                           ┌─┴───────────────────────▼─┐
 ///                           │       NIOSSLHandler       │
@@ -38,19 +40,19 @@ import Logging
 ///                             │                       ▼
 ///
 ///    The `NIOSSLHandler` is optional and depends on how the framework user has configured
-///    their server. The `HTTPProtocolSwitcher` detects which HTTP version is being used and
+///    their server. The `GRPCServerPipelineConfigurator` detects which HTTP version is being used
+///    (via ALPN if TLS is used or by parsing the first bytes on the connection otherwise) and
 ///    configures the pipeline accordingly.
 ///
 /// 2. HTTP version detected. "HTTP Handlers" depends on the HTTP version determined by
-///    `HTTPProtocolSwitcher`. All of these handlers are provided by NIO except for the
-///    `WebCORSHandler` which is used for HTTP/1.
+///    `GRPCServerPipelineConfigurator`. In the case of HTTP/2:
 ///
 ///                           ┌─────────────────────────────────┐
-///                           │ GRPCServerRequestRoutingHandler │
+///                           │      HTTP2StreamMultiplexer     │
 ///                           └─▲─────────────────────────────┬─┘
-///        HTTPServerRequestPart│                             │HTTPServerResponsePart
+///                   HTTP2Frame│                             │HTTP2Frame
 ///                           ┌─┴─────────────────────────────▼─┐
-///                           │          HTTP Handlers          │
+///                           │           HTTP2Handler          │
 ///                           └─▲─────────────────────────────┬─┘
 ///                   ByteBuffer│                             │ByteBuffer
 ///                           ┌─┴─────────────────────────────▼─┐
@@ -59,28 +61,20 @@ import Logging
 ///                   ByteBuffer│                             │ByteBuffer
 ///                             │                             ▼
 ///
-///    The `GRPCServerRequestRoutingHandler` resolves the request head and configures the rest of
-///    the pipeline based on the RPC call being made.
+///    The `HTTP2StreamMultiplexer` provides one `Channel` for each HTTP/2 stream (and thus each
+///    RPC).
 ///
-/// 3. The call has been resolved and is a function that this server can handle. Responses are
-///    written into `BaseCallHandler` by a user-implemented `CallHandlerProvider`.
+/// 3. The frames for each stream channel are routed by the `HTTP2ToRawGRPCServerCodec` handler to
+///    a handler containing the user-implemented logic provided by a `CallHandlerProvider`:
 ///
 ///                           ┌─────────────────────────────────┐
 ///                           │         BaseCallHandler*        │
 ///                           └─▲─────────────────────────────┬─┘
-///    GRPCServerRequestPart<T1>│                             │GRPCServerResponsePart<T2>
+///        GRPCServerRequestPart│                             │GRPCServerResponsePart
 ///                           ┌─┴─────────────────────────────▼─┐
-///                           │      HTTP1ToGRPCServerCodec     │
+///                           │    HTTP2ToRawGRPCServerCodec    │
 ///                           └─▲─────────────────────────────┬─┘
-///        HTTPServerRequestPart│                             │HTTPServerResponsePart
-///                           ┌─┴─────────────────────────────▼─┐
-///                           │          HTTP Handlers          │
-///                           └─▲─────────────────────────────┬─┘
-///                   ByteBuffer│                             │ByteBuffer
-///                           ┌─┴─────────────────────────────▼─┐
-///                           │          NIOSSLHandler          │
-///                           └─▲─────────────────────────────┬─┘
-///                   ByteBuffer│                             │ByteBuffer
+///      HTTP2Frame.FramePayload│                             │HTTP2Frame.FramePayload
 ///                             │                             ▼
 ///
 public final class Server {
@@ -96,65 +90,85 @@ public final class Server {
 
     return bootstrap
       // Enable `SO_REUSEADDR` to avoid "address already in use" error.
-      .serverChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+      .serverChannelOption(
+        ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR),
+        value: 1
+      )
       // Set the handlers that are applied to the accepted Channels
       .childChannelInitializer { channel in
-        let protocolSwitcher = HTTPProtocolSwitcher(
-          errorDelegate: configuration.errorDelegate,
-          httpTargetWindowSize: configuration.httpTargetWindowSize,
-          keepAlive: configuration.connectionKeepalive,
-          idleTimeout: configuration.connectionIdleTimeout,
-          logger: configuration.logger
-        ) { (channel, logger) -> EventLoopFuture<Void> in
-          let handler = GRPCServerRequestRoutingHandler(
-            servicesByName: configuration.serviceProvidersByName,
-            encoding: configuration.messageEncoding,
-            errorDelegate: configuration.errorDelegate,
-            logger: logger
+        var configuration = configuration
+        configuration.logger[metadataKey: MetadataKey.connectionID] = "\(UUID().uuidString)"
+        configuration.logger[metadataKey: MetadataKey.remoteAddress] = channel.remoteAddress
+          .map { "\($0)" } ?? "n/a"
+
+        do {
+          let sync = channel.pipeline.syncOperations
+          if let tls = configuration.tls {
+            try sync.configureTLS(configuration: tls)
+          }
+
+          // Configures the pipeline based on whether the connection uses TLS or not.
+          try sync.addHandler(GRPCServerPipelineConfigurator(configuration: configuration))
+
+          // Work around the zero length write issue, if needed.
+          let requiresZeroLengthWorkaround = PlatformSupport.requiresZeroLengthWriteWorkaround(
+            group: configuration.eventLoopGroup,
+            hasTLS: configuration.tls != nil
           )
-          return channel.pipeline.addHandler(handler)
-        }
-
-        let configured: EventLoopFuture<Void>
-
-        if let tls = configuration.tls {
-          configured = channel.configureTLS(configuration: tls).flatMap {
-            channel.pipeline.addHandler(protocolSwitcher)
+          if requiresZeroLengthWorkaround,
+            #available(OSX 10.14, iOS 12.0, tvOS 12.0, watchOS 6.0, *) {
+            try sync.addHandler(NIOFilterEmptyWritesHandler())
           }
-        } else {
-          configured = channel.pipeline.addHandler(protocolSwitcher)
+        } catch {
+          return channel.eventLoop.makeFailedFuture(error)
         }
 
-        // Add the debug initializer, if there is one.
+        // Run the debug initializer, if there is one.
         if let debugAcceptedChannelInitializer = configuration.debugChannelInitializer {
-          return configured.flatMap {
-            debugAcceptedChannelInitializer(channel)
-          }
+          return debugAcceptedChannelInitializer(channel)
         } else {
-          return configured
+          return channel.eventLoop.makeSucceededVoidFuture()
         }
       }
 
       // Enable TCP_NODELAY and SO_REUSEADDR for the accepted Channels
       .childChannelOption(ChannelOptions.socket(IPPROTO_TCP, TCP_NODELAY), value: 1)
-      .childChannelOption(ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR), value: 1)
+      .childChannelOption(
+        ChannelOptions.socket(SocketOptionLevel(SOL_SOCKET), SO_REUSEADDR),
+        value: 1
+      )
   }
 
   /// Starts a server with the given configuration. See `Server.Configuration` for the options
   /// available to configure the server.
   public static func start(configuration: Configuration) -> EventLoopFuture<Server> {
-    return makeBootstrap(configuration: configuration)
+    let quiescingHelper = ServerQuiescingHelper(group: configuration.eventLoopGroup)
+
+    return self.makeBootstrap(configuration: configuration)
+      .serverChannelInitializer { channel in
+        channel.pipeline.addHandler(quiescingHelper.makeServerChannelHandler(channel: channel))
+      }
       .bind(to: configuration.target)
       .map { channel in
-        Server(channel: channel, errorDelegate: configuration.errorDelegate)
+        Server(
+          channel: channel,
+          quiescingHelper: quiescingHelper,
+          errorDelegate: configuration.errorDelegate
+        )
       }
   }
 
   public let channel: Channel
+  private let quiescingHelper: ServerQuiescingHelper
   private var errorDelegate: ServerErrorDelegate?
 
-  private init(channel: Channel, errorDelegate: ServerErrorDelegate?) {
+  private init(
+    channel: Channel,
+    quiescingHelper: ServerQuiescingHelper,
+    errorDelegate: ServerErrorDelegate?
+  ) {
     self.channel = channel
+    self.quiescingHelper = quiescingHelper
 
     // Maintain a strong reference to ensure it lives as long as the server.
     self.errorDelegate = errorDelegate
@@ -166,19 +180,38 @@ public final class Server {
     }
 
     // nil out errorDelegate to avoid retain cycles.
-    onClose.whenComplete { _ in
+    self.onClose.whenComplete { _ in
       self.errorDelegate = nil
     }
   }
 
   /// Fired when the server shuts down.
   public var onClose: EventLoopFuture<Void> {
-    return channel.closeFuture
+    return self.channel.closeFuture
   }
 
-  /// Shut down the server; this should be called to avoid leaking resources.
+  /// Initiates a graceful shutdown. Existing RPCs may run to completion, any new RPCs or
+  /// connections will be rejected.
+  public func initiateGracefulShutdown(promise: EventLoopPromise<Void>?) {
+    self.quiescingHelper.initiateShutdown(promise: promise)
+  }
+
+  /// Initiates a graceful shutdown. Existing RPCs may run to completion, any new RPCs or
+  /// connections will be rejected.
+  public func initiateGracefulShutdown() -> EventLoopFuture<Void> {
+    let promise = self.channel.eventLoop.makePromise(of: Void.self)
+    self.initiateGracefulShutdown(promise: promise)
+    return promise.futureResult
+  }
+
+  /// Shutdown the server immediately. Active RPCs and connections will be terminated.
+  public func close(promise: EventLoopPromise<Void>?) {
+    self.channel.close(mode: .all, promise: promise)
+  }
+
+  /// Shutdown the server immediately. Active RPCs and connections will be terminated.
   public func close() -> EventLoopFuture<Void> {
-    return channel.close(mode: .all)
+    return self.channel.close(mode: .all)
   }
 }
 
@@ -193,7 +226,18 @@ extension Server {
     public var eventLoopGroup: EventLoopGroup
 
     /// Providers the server should use to handle gRPC requests.
-    public var serviceProviders: [CallHandlerProvider]
+    public var serviceProviders: [CallHandlerProvider] {
+      get {
+        return Array(self.serviceProvidersByName.values)
+      }
+      set {
+        self
+          .serviceProvidersByName = Dictionary(
+            uniqueKeysWithValues: newValue
+              .map { ($0.serviceName, $0) }
+          )
+      }
+    }
 
     /// An error delegate which is called when errors are caught. Provided delegates **must not
     /// maintain a strong reference to this `Server`**. Doing so will cause a retain cycle.
@@ -235,6 +279,12 @@ extension Server {
     ///   be invoked at most once per accepted connection.
     public var debugChannelInitializer: ((Channel) -> EventLoopFuture<Void>)?
 
+    /// A calculated private cache of the service providers by name.
+    ///
+    /// This is how gRPC consumes the service providers internally. Caching this as stored data avoids
+    /// the need to recalculate this dictionary each time we receive an rpc.
+    internal var serviceProvidersByName: [Substring: CallHandlerProvider]
+
     /// Create a `Configuration` with some pre-defined defaults.
     ///
     /// - Parameters:
@@ -245,7 +295,8 @@ extension Server {
     ///   - errorDelegate: The error delegate, defaulting to a logging delegate.
     ///   - tls: TLS configuration, defaulting to `nil`.
     ///   - connectionKeepalive: The keepalive configuration to use.
-    ///   - connectionIdleTimeout: The amount of time to wait before closing the connection, defaulting to 5 minutes.
+    ///   - connectionIdleTimeout: The amount of time to wait before closing the connection, this is
+    ///       indefinite by default.
     ///   - messageEncoding: Message compression configuration, defaulting to no compression.
     ///   - httpTargetWindowSize: The HTTP/2 flow control target window size.
     ///   - logger: A logger. Defaults to a no-op logger.
@@ -258,7 +309,7 @@ extension Server {
       errorDelegate: ServerErrorDelegate? = nil,
       tls: TLS? = nil,
       connectionKeepalive: ServerConnectionKeepalive = ServerConnectionKeepalive(),
-      connectionIdleTimeout: TimeAmount = .minutes(5),
+      connectionIdleTimeout: TimeAmount = .nanoseconds(.max),
       messageEncoding: ServerMessageEncoding = .disabled,
       httpTargetWindowSize: Int = 65535,
       logger: Logger = Logger(label: "io.grpc", factory: { _ in SwiftLogNoOpLogHandler() }),
@@ -266,7 +317,11 @@ extension Server {
     ) {
       self.target = target
       self.eventLoopGroup = eventLoopGroup
-      self.serviceProviders = serviceProviders
+      self
+        .serviceProvidersByName = Dictionary(
+          uniqueKeysWithValues: serviceProviders
+            .map { ($0.serviceName, $0) }
+        )
       self.errorDelegate = errorDelegate
       self.tls = tls
       self.connectionKeepalive = connectionKeepalive
@@ -279,38 +334,27 @@ extension Server {
   }
 }
 
-fileprivate extension Server.Configuration {
-  var serviceProvidersByName: [String: CallHandlerProvider] {
-    return Dictionary(uniqueKeysWithValues: self.serviceProviders.map { ($0.serviceName, $0) })
-  }
-}
-
-fileprivate extension Channel {
+extension ChannelPipeline.SynchronousOperations {
   /// Configure an SSL handler on the channel.
   ///
   /// - Parameters:
   ///   - configuration: The configuration to use when creating the handler.
-  /// - Returns: A future which will be succeeded when the pipeline has been configured.
-  func configureTLS(configuration: Server.Configuration.TLS) -> EventLoopFuture<Void> {
-    do {
-      let context = try NIOSSLContext(configuration: configuration.configuration)
-      return self.pipeline.addHandler(NIOSSLServerHandler(context: context))
-    } catch {
-      return self.pipeline.eventLoop.makeFailedFuture(error)
-    }
+  fileprivate func configureTLS(configuration: Server.Configuration.TLS) throws {
+    let context = try NIOSSLContext(configuration: configuration.configuration)
+    try self.addHandler(NIOSSLServerHandler(context: context))
   }
 }
 
-fileprivate extension ServerBootstrapProtocol {
+private extension ServerBootstrapProtocol {
   func bind(to target: BindTarget) -> EventLoopFuture<Channel> {
     switch target.wrapped {
-    case .hostAndPort(let host, let port):
+    case let .hostAndPort(host, port):
       return self.bind(host: host, port: port)
 
-    case .unixDomainSocket(let path):
+    case let .unixDomainSocket(path):
       return self.bind(unixDomainSocketPath: path)
 
-    case .socketAddress(let address):
+    case let .socketAddress(address):
       return self.bind(to: address)
     }
   }

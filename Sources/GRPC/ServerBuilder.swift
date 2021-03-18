@@ -13,9 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import Logging
 import NIO
 import NIOSSL
-import Logging
 
 extension Server {
   public class Builder {
@@ -38,7 +38,11 @@ extension Server {
         return self.tls
       }
 
-      fileprivate init(group: EventLoopGroup, certificateChain: [NIOSSLCertificate], privateKey: NIOSSLPrivateKey) {
+      fileprivate init(
+        group: EventLoopGroup,
+        certificateChain: [NIOSSLCertificate],
+        privateKey: NIOSSLPrivateKey
+      ) {
         self.tls = .init(
           certificateChain: certificateChain.map { .certificate($0) },
           privateKey: .privateKey(privateKey)
@@ -85,8 +89,8 @@ extension Server.Builder {
 
 extension Server.Builder {
   /// The amount of time to wait before closing connections. The idle timeout will start only
-  /// if there are no RPCs in progress and will be cancelled as soon as any RPCs start. Defaults to
-  /// 5 minutes if not set.
+  /// if there are no RPCs in progress and will be cancelled as soon as any RPCs start. Unless a
+  /// an idle timeout it set connections will not be idled by default.
   @discardableResult
   public func withConnectionIdleTimeout(_ timeout: TimeAmount) -> Self {
     self.configuration.connectionIdleTimeout = timeout
@@ -118,6 +122,18 @@ extension Server.Builder.Secure {
   @discardableResult
   public func withTLS(certificateVerification: CertificateVerification) -> Self {
     self.tls.certificateVerification = certificateVerification
+    return self
+  }
+
+  /// Sets whether the server's TLS handshake requires a protocol to be negotiated via ALPN. This
+  /// defaults to `true` if not otherwise set.
+  ///
+  /// If this option is set to `false` and no protocol is negotiated via ALPN then the server will
+  /// parse the initial bytes on the connection to determine whether HTTP/2 or HTTP/1.1 (gRPC-Web)
+  /// is being used and configure the connection appropriately.
+  @discardableResult
+  public func withTLS(requiringALPN: Bool) -> Self {
+    self.tls.requireALPN = requiringALPN
     return self
   }
 }

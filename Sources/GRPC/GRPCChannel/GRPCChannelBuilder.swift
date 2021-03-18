@@ -47,8 +47,9 @@ extension ClientConnection {
     public func connect(host: String, port: Int) -> ClientConnection {
       // Finish setting up the configuration.
       self.configuration.target = .hostAndPort(host, port)
-      self.configuration.connectionBackoff = self.connectionBackoffIsEnabled ? self.connectionBackoff : nil
-      self.configuration.tls = maybeTLS
+      self.configuration.connectionBackoff = self.connectionBackoffIsEnabled ? self
+        .connectionBackoff : nil
+      self.configuration.tls = self.maybeTLS
       return ClientConnection(configuration: self.configuration)
     }
   }
@@ -150,7 +151,7 @@ extension ClientConnection.Builder {
   /// The amount of time to wait before closing the connection. The idle timeout will start only
   /// if there are no RPCs in progress and will be cancelled as soon as any RPCs start. If a
   /// connection becomes idle, starting a new RPC will automatically create a new connection.
-  /// Defaults to 5 minutes if not set.
+  /// Defaults to 30 minutes if not set.
   @discardableResult
   public func withConnectionIdleTimeout(_ timeout: TimeAmount) -> Self {
     self.configuration.connectionIdleTimeout = timeout
@@ -226,6 +227,23 @@ extension ClientConnection.Builder.Secure {
     self.tls.trustRoots = trustRoots
     return self
   }
+
+  /// Whether to verify remote certificates. Defaults to `.fullVerification` if not otherwise
+  /// configured.
+  @discardableResult
+  public func withTLS(certificateVerification: CertificateVerification) -> Self {
+    self.tls.certificateVerification = certificateVerification
+    return self
+  }
+
+  /// A custom verification callback that allows completely overriding the certificate verification logic.
+  @discardableResult
+  public func withTLSCustomVerificationCallback(
+    _ callback: @escaping NIOSSLCustomVerificationCallback
+  ) -> Self {
+    self.tls.customVerificationCallback = callback
+    return self
+  }
 }
 
 extension ClientConnection.Builder {
@@ -264,7 +282,7 @@ extension ClientConnection.Builder {
   }
 }
 
-fileprivate extension Double {
+private extension Double {
   static func seconds(from amount: TimeAmount) -> Double {
     return Double(amount.nanoseconds) / 1_000_000_000
   }

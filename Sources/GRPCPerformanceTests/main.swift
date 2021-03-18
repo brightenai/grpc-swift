@@ -13,65 +13,64 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import ArgumentParser
 import Foundation
 import GRPC
+import Logging
 import NIO
 import NIOSSL
-import EchoImplementation
-import EchoModel
-import Logging
+
+let smallRequest = String(repeating: "x", count: 8)
+let largeRequest = String(repeating: "x", count: 1 << 16) // 65k
 
 // Add benchmarks here!
 func runBenchmarks(spec: TestSpec) {
-  let smallRequest = String(repeating: "x", count: 8)
-  let largeRequest = String(repeating: "x", count: 1 << 16)  // 65k
-
   measureAndPrint(
     description: "unary_10k_small_requests",
-    benchmark: Unary(requests: 10_000, text: smallRequest),
+    benchmark: Unary(requests: 10000, text: smallRequest),
     spec: spec
   )
 
   measureAndPrint(
     description: "unary_10k_long_requests",
-    benchmark: Unary(requests: 10_000, text: largeRequest),
+    benchmark: Unary(requests: 10000, text: largeRequest),
     spec: spec
   )
 
   measureAndPrint(
     description: "bidi_10k_small_requests_in_batches_of_1",
-    benchmark: Bidi(requests: 10_000, text: smallRequest, batchSize: 1),
+    benchmark: Bidi(requests: 10000, text: smallRequest, batchSize: 1),
     spec: spec
   )
 
   measureAndPrint(
     description: "bidi_10k_small_requests_in_batches_of_5",
-    benchmark: Bidi(requests: 10_000, text: smallRequest, batchSize: 5),
+    benchmark: Bidi(requests: 10000, text: smallRequest, batchSize: 5),
     spec: spec
   )
 
   measureAndPrint(
     description: "bidi_1k_large_requests_in_batches_of_5",
-    benchmark: Bidi(requests: 1_000, text: largeRequest, batchSize: 1),
+    benchmark: Bidi(requests: 1000, text: largeRequest, batchSize: 1),
     spec: spec
   )
 
   measureAndPrint(
     description: "embedded_client_unary_10k_small_requests",
-    benchmark: EmbeddedClientThroughput(requests: 10_000, text: smallRequest),
+    benchmark: EmbeddedClientThroughput(requests: 10000, text: smallRequest),
     spec: spec
   )
 
   measureAndPrint(
-    description: "embedded_client_unary_10k_large_requests",
-    benchmark: EmbeddedClientThroughput(requests: 10_00, text: largeRequest),
+    description: "embedded_client_unary_1k_large_requests",
+    benchmark: EmbeddedClientThroughput(requests: 1000, text: largeRequest),
     spec: spec
   )
 
   measureAndPrint(
-    description: "embedded_client_unary_10k_large_requests_1k_frames",
+    description: "embedded_client_unary_1k_large_requests_1k_frames",
     benchmark: EmbeddedClientThroughput(
-      requests: 10_00,
+      requests: 1000,
       text: largeRequest,
       maxResponseFrameSize: 1024
     ),
@@ -79,14 +78,77 @@ func runBenchmarks(spec: TestSpec) {
   )
 
   measureAndPrint(
+    description: "embedded_server_unary_10k_small_requests",
+    benchmark: EmbeddedServerChildChannelBenchmark(
+      mode: .unary(rpcs: 10000),
+      text: smallRequest
+    ),
+    spec: spec
+  )
+
+  measureAndPrint(
+    description: "embedded_server_client_streaming_1_rpc_10k_small_requests",
+    benchmark: EmbeddedServerChildChannelBenchmark(
+      mode: .clientStreaming(rpcs: 1, requestsPerRPC: 10000),
+      text: smallRequest
+    ),
+    spec: spec
+  )
+
+  measureAndPrint(
+    description: "embedded_server_client_streaming_10k_rpcs_1_small_requests",
+    benchmark: EmbeddedServerChildChannelBenchmark(
+      mode: .clientStreaming(rpcs: 10000, requestsPerRPC: 1),
+      text: smallRequest
+    ),
+    spec: spec
+  )
+
+  measureAndPrint(
+    description: "embedded_server_server_streaming_1_rpc_10k_small_responses",
+    benchmark: EmbeddedServerChildChannelBenchmark(
+      mode: .serverStreaming(rpcs: 1, responsesPerRPC: 10000),
+      text: smallRequest
+    ),
+    spec: spec
+  )
+
+  measureAndPrint(
+    description: "embedded_server_server_streaming_10k_rpcs_1_small_response",
+    benchmark: EmbeddedServerChildChannelBenchmark(
+      mode: .serverStreaming(rpcs: 10000, responsesPerRPC: 1),
+      text: smallRequest
+    ),
+    spec: spec
+  )
+
+  measureAndPrint(
+    description: "embedded_server_bidi_1_rpc_10k_small_requests",
+    benchmark: EmbeddedServerChildChannelBenchmark(
+      mode: .bidirectional(rpcs: 1, requestsPerRPC: 10000),
+      text: smallRequest
+    ),
+    spec: spec
+  )
+
+  measureAndPrint(
+    description: "embedded_server_bidi_10k_rpcs_1_small_request",
+    benchmark: EmbeddedServerChildChannelBenchmark(
+      mode: .bidirectional(rpcs: 10000, requestsPerRPC: 1),
+      text: smallRequest
+    ),
+    spec: spec
+  )
+
+  measureAndPrint(
     description: "percent_encode_decode_10k_status_messages",
-    benchmark: PercentEncoding(iterations: 10_000, requiresEncoding: true),
+    benchmark: PercentEncoding(iterations: 10000, requiresEncoding: true),
     spec: spec
   )
 
   measureAndPrint(
     description: "percent_encode_decode_10k_ascii_status_messages",
-    benchmark: PercentEncoding(iterations: 10_000, requiresEncoding: false),
+    benchmark: PercentEncoding(iterations: 10000, requiresEncoding: false),
     spec: spec
   )
 }
@@ -117,58 +179,35 @@ struct TestSpec {
       switch self {
       case .all:
         return true
-      case .some(let selectedTests):
+      case let .some(selectedTests):
         return selectedTests.contains(description)
       }
     }
   }
 }
 
-func usage(program: String) -> String {
-  return """
-  USAGE: \(program) [-alh] [BENCHMARK ...]
+struct PerformanceTests: ParsableCommand {
+  @Flag(name: .shortAndLong, help: "List all available tests")
+  var list: Bool = false
 
-  OPTIONS:
+  @Flag(name: .shortAndLong, help: "Run all tests")
+  var all: Bool = false
 
-    The following options are available:
+  @Argument(help: "The tests to run")
+  var tests: [String] = []
 
-    -a  Run all benchmarks. (Also: '--all')
+  func run() throws {
+    let spec: TestSpec
 
-    -l  List all benchmarks. (Also: '--list')
-
-    -h  Prints this message. (Also: '--help')
-  """
-}
-
-func main(args: [String]) {
-  // Quieten the logs.
-  LoggingSystem.bootstrap {
-    var handler = StreamLogHandler.standardOutput(label: $0)
-    handler.logLevel = .critical
-    return handler
-  }
-
-  let program = args.first!
-  let arg0 = args.dropFirst().first
-
-  switch arg0 {
-  case "-h", "--help":
-    print(usage(program: program))
-
-  case "-l", "--list":
-    runBenchmarks(spec: TestSpec(action: .list))
-
-  case "-a", "-all":
-    runBenchmarks(spec: TestSpec(action: .run(.all)))
-
-  default:
-    // This must be a list of benchmarks to run.
-    let tests = Array(args.dropFirst())
-    if tests.isEmpty {
-      print(usage(program: program))
+    if self.list {
+      spec = TestSpec(action: .list)
+    } else if self.all {
+      spec = TestSpec(action: .run(.all))
     } else {
-      runBenchmarks(spec: TestSpec(action: .run(.some(tests))))
+      spec = TestSpec(action: .run(.some(self.tests)))
     }
+
+    runBenchmarks(spec: spec)
   }
 }
 
@@ -177,4 +216,4 @@ assert({
   return true
 }())
 
-main(args: CommandLine.arguments)
+PerformanceTests.main()

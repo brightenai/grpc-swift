@@ -34,12 +34,14 @@ extension GRPCClient {
     path: String,
     request: Request,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     responseType: Response.Type = Response.self
   ) -> UnaryCall<Request, Response> {
     return self.channel.makeUnaryCall(
       path: path,
       request: request,
-      callOptions: callOptions ?? self.defaultCallOptions
+      callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors
     )
   }
 
@@ -47,19 +49,25 @@ extension GRPCClient {
     path: String,
     request: Request,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     responseType: Response.Type = Response.self
   ) -> UnaryCall<Request, Response> {
     return self.channel.makeUnaryCall(
       path: path,
       request: request,
-      callOptions: callOptions ?? self.defaultCallOptions
+      callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors
     )
   }
 
-  public func makeServerStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+  public func makeServerStreamingCall<
+    Request: SwiftProtobuf.Message,
+    Response: SwiftProtobuf.Message
+  >(
     path: String,
     request: Request,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     responseType: Response.Type = Response.self,
     handler: @escaping (Response) -> Void
   ) -> ServerStreamingCall<Request, Response> {
@@ -67,6 +75,7 @@ extension GRPCClient {
       path: path,
       request: request,
       callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors,
       handler: handler
     )
   }
@@ -75,6 +84,7 @@ extension GRPCClient {
     path: String,
     request: Request,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     responseType: Response.Type = Response.self,
     handler: @escaping (Response) -> Void
   ) -> ServerStreamingCall<Request, Response> {
@@ -82,37 +92,49 @@ extension GRPCClient {
       path: path,
       request: request,
       callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors,
       handler: handler
     )
   }
 
-  public func makeClientStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+  public func makeClientStreamingCall<
+    Request: SwiftProtobuf.Message,
+    Response: SwiftProtobuf.Message
+  >(
     path: String,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     requestType: Request.Type = Request.self,
     responseType: Response.Type = Response.self
   ) -> ClientStreamingCall<Request, Response> {
     return self.channel.makeClientStreamingCall(
       path: path,
-      callOptions: callOptions ?? self.defaultCallOptions
+      callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors
     )
   }
 
   public func makeClientStreamingCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     requestType: Request.Type = Request.self,
     responseType: Response.Type = Response.self
   ) -> ClientStreamingCall<Request, Response> {
     return self.channel.makeClientStreamingCall(
       path: path,
-      callOptions: callOptions ?? self.defaultCallOptions
+      callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors
     )
   }
 
-  public func makeBidirectionalStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+  public func makeBidirectionalStreamingCall<
+    Request: SwiftProtobuf.Message,
+    Response: SwiftProtobuf.Message
+  >(
     path: String,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     requestType: Request.Type = Request.self,
     responseType: Response.Type = Response.self,
     handler: @escaping (Response) -> Void
@@ -120,6 +142,7 @@ extension GRPCClient {
     return self.channel.makeBidirectionalStreamingCall(
       path: path,
       callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors,
       handler: handler
     )
   }
@@ -127,6 +150,7 @@ extension GRPCClient {
   public func makeBidirectionalStreamingCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     callOptions: CallOptions? = nil,
+    interceptors: [ClientInterceptor<Request, Response>] = [],
     requestType: Request.Type = Request.self,
     responseType: Response.Type = Response.self,
     handler: @escaping (Response) -> Void
@@ -134,6 +158,7 @@ extension GRPCClient {
     return self.channel.makeBidirectionalStreamingCall(
       path: path,
       callOptions: callOptions ?? self.defaultCallOptions,
+      interceptors: interceptors,
       handler: handler
     )
   }
@@ -141,8 +166,21 @@ extension GRPCClient {
 
 /// A client which has no generated stubs and may be used to create gRPC calls manually.
 /// See `GRPCClient` for details.
+///
+/// Example:
+///
+/// ```
+/// let client = AnyServiceClient(channel: channel)
+/// let rpc: UnaryCall<Request, Response> = client.makeUnaryCall(
+///   path: "/serviceName/methodName",
+///   request: .with { ... },
+/// }
+/// ```
 public final class AnyServiceClient: GRPCClient {
+  /// The gRPC channel over which RPCs are sent and received.
   public let channel: GRPCChannel
+
+  /// The default options passed to each RPC unless passed for each RPC.
   public var defaultCallOptions: CallOptions
 
   /// Creates a client which may be used to call any service.

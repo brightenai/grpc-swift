@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 import Foundation
-import NIO
-import NIOHTTP1
-import NIOHPACK
 import Logging
+import NIO
+import NIOHPACK
+import NIOHTTP1
 import SwiftProtobuf
 
 enum ReceiveResponseHeadError: Error, Equatable {
@@ -34,7 +34,7 @@ enum ReceiveResponseHeadError: Error, Equatable {
   case invalidState
 }
 
-enum ReceiveEndOfResponseStreamError: Error {
+enum ReceiveEndOfResponseStreamError: Error, Equatable {
   /// The 'content-type' header was missing or the value is not supported by this implementation.
   case invalidContentType(String?)
 
@@ -167,6 +167,9 @@ struct GRPCClientStateMachine {
     }
   }
 
+  /// The default user-agent string.
+  private static let userAgent = "grpc-swift-nio/\(Version.versionString)"
+
   /// Creates a state machine representing a gRPC client's request and response stream state.
   ///
   /// - Parameter requestArity: The expected number of messages on the request stream.
@@ -199,7 +202,7 @@ struct GRPCClientStateMachine {
     requestHead: _GRPCRequestHead
   ) -> Result<HPACKHeaders, SendRequestHeadersError> {
     return self.withStateAvoidingCoWs { state in
-      return state.sendRequestHeaders(requestHead: requestHead)
+      state.sendRequestHeaders(requestHead: requestHead)
     }
   }
 
@@ -230,7 +233,7 @@ struct GRPCClientStateMachine {
     allocator: ByteBufferAllocator
   ) -> Result<ByteBuffer, MessageWriteError> {
     return self.withStateAvoidingCoWs { state in
-      return state.sendRequest(message, compressed: compressed, allocator: allocator)
+      state.sendRequest(message, compressed: compressed, allocator: allocator)
     }
   }
 
@@ -252,7 +255,7 @@ struct GRPCClientStateMachine {
   /// will result in a `.invalidState` error.
   mutating func sendEndOfRequestStream() -> Result<Void, SendEndOfRequestStreamError> {
     return self.withStateAvoidingCoWs { state in
-      return state.sendEndOfRequestStream()
+      state.sendEndOfRequestStream()
     }
   }
 
@@ -281,7 +284,7 @@ struct GRPCClientStateMachine {
     _ headers: HPACKHeaders
   ) -> Result<Void, ReceiveResponseHeadError> {
     return self.withStateAvoidingCoWs { state in
-      return state.receiveResponseHeaders(headers)
+      state.receiveResponseHeaders(headers)
     }
   }
 
@@ -339,7 +342,22 @@ struct GRPCClientStateMachine {
     _ trailers: HPACKHeaders
   ) -> Result<GRPCStatus, ReceiveEndOfResponseStreamError> {
     return self.withStateAvoidingCoWs { state in
-      return state.receiveEndOfResponseStream(trailers)
+      state.receiveEndOfResponseStream(trailers)
+    }
+  }
+
+  /// Receive a DATA frame with the end stream flag set. Determines whether it is safe for the
+  /// caller to ignore the end stream flag or whether a synthesised status should be forwarded.
+  ///
+  /// Receiving a DATA frame with the end stream flag set is unexpected: the specification dictates
+  /// that an RPC should be ended by the server sending the client a HEADERS frame with end stream
+  /// set. However, we will tolerate end stream on a DATA frame if we believe the RPC has already
+  /// completed (i.e. we are in the 'clientClosedServerClosed' state). In cases where we don't
+  /// expect end of stream on a DATA frame we will emit a status with a message explaining
+  /// the protocol violation.
+  mutating func receiveEndOfResponseStream() -> GRPCStatus? {
+    return self.withStateAvoidingCoWs { state in
+      state.receiveEndOfResponseStream()
     }
   }
 
@@ -439,11 +457,11 @@ extension GRPCClientStateMachine.State {
     let result: Result<Void, SendEndOfRequestStreamError>
 
     switch self {
-    case .clientActiveServerIdle(_, let pendingReadState):
+    case let .clientActiveServerIdle(_, pendingReadState):
       result = .success(())
       self = .clientClosedServerIdle(pendingReadState: pendingReadState)
 
-    case .clientActiveServerActive(_, let readState):
+    case let .clientActiveServerActive(_, readState):
       result = .success(())
       self = .clientClosedServerActive(readState: readState)
 
@@ -470,14 +488,16 @@ extension GRPCClientStateMachine.State {
 
     switch self {
     case let .clientActiveServerIdle(writeState, pendingReadState):
-      result = self.parseResponseHeaders(headers, pendingReadState: pendingReadState).map { readState in
-        self = .clientActiveServerActive(writeState: writeState, readState: readState)
-      }
+      result = self.parseResponseHeaders(headers, pendingReadState: pendingReadState)
+        .map { readState in
+          self = .clientActiveServerActive(writeState: writeState, readState: readState)
+        }
 
     case let .clientClosedServerIdle(pendingReadState):
-      result = self.parseResponseHeaders(headers, pendingReadState: pendingReadState).map { readState in
-        self = .clientClosedServerActive(readState: readState)
-      }
+      result = self.parseResponseHeaders(headers, pendingReadState: pendingReadState)
+        .map { readState in
+          self = .clientClosedServerActive(readState: readState)
+        }
 
     case .clientIdleServerIdle,
          .clientClosedServerActive,
@@ -499,7 +519,7 @@ extension GRPCClientStateMachine.State {
     let result: Result<[ByteBuffer], MessageReadError>
 
     switch self {
-    case .clientClosedServerActive(var readState):
+    case var .clientClosedServerActive(readState):
       result = readState.readMessages(&buffer)
       self = .clientClosedServerActive(readState: readState)
 
@@ -550,6 +570,36 @@ extension GRPCClientStateMachine.State {
     return result
   }
 
+  /// See `GRPCClientStateMachine.receiveEndOfResponseStream()`.
+  mutating func receiveEndOfResponseStream() -> GRPCStatus? {
+    let status: GRPCStatus?
+
+    switch self {
+    case .clientIdleServerIdle:
+      // Can't see end stream before writing on it.
+      preconditionFailure()
+
+    case .clientActiveServerIdle,
+         .clientActiveServerActive,
+         .clientClosedServerIdle,
+         .clientClosedServerActive:
+      self = .clientClosedServerClosed
+      status = .init(
+        code: .internalError,
+        message: "Protocol violation: received DATA frame with end stream set"
+      )
+
+    case .clientClosedServerClosed:
+      // We've already closed. Ignore this.
+      status = nil
+
+    case .modifying:
+      preconditionFailure("State left as 'modifying'")
+    }
+
+    return status
+  }
+
   /// Makes the request headers (`Request-Headers` in the specification) used to initiate an RPC
   /// call.
   ///
@@ -568,19 +618,23 @@ extension GRPCClientStateMachine.State {
     customMetadata: HPACKHeaders,
     compression: ClientMessageEncoding
   ) -> HPACKHeaders {
-    // Note: we don't currently set the 'grpc-encoding' header, if we do we will need to feed that
-    // encoded into the message writer.
-    var headers: HPACKHeaders = [
-      ":method": method,
-      ":path": path,
-      ":authority": host,
-      ":scheme": scheme,
-      "content-type": "application/grpc",
-      "te": "trailers",  // Used to detect incompatible proxies, part of the gRPC specification.
-    ]
+    var headers = HPACKHeaders()
+    // The 10 is:
+    // - 6 which are required and added just below, and
+    // - 4 which are possibly added, depending on conditions.
+    headers.reserveCapacity(10 + customMetadata.count)
+
+    // Add the required headers.
+    headers.add(name: ":method", value: method)
+    headers.add(name: ":path", value: path)
+    headers.add(name: ":authority", value: host)
+    headers.add(name: ":scheme", value: scheme)
+    headers.add(name: "content-type", value: "application/grpc")
+    // Used to detect incompatible proxies, part of the gRPC specification.
+    headers.add(name: "te", value: "trailers")
 
     switch compression {
-    case .enabled(let configuration):
+    case let .enabled(configuration):
       // Request encoding.
       if let outbound = configuration.outbound {
         headers.add(name: GRPCHeaderName.encoding, value: outbound.name)
@@ -602,13 +656,13 @@ extension GRPCClientStateMachine.State {
 
     // Add user-defined custom metadata: this should come after the call definition headers.
     // TODO: make header normalization user-configurable.
-    headers.add(contentsOf: customMetadata.map { (name, value, indexing) in
-      return (name.lowercased(), value, indexing)
+    headers.add(contentsOf: customMetadata.lazy.map { name, value, indexing in
+      (name.lowercased(), value, indexing)
     })
 
     // Add default user-agent value, if `customMetadata` didn't contain user-agent
-    if headers["user-agent"].isEmpty {
-      headers.add(name: "user-agent", value: "grpc-swift-nio")  // TODO: Add a more specific user-agent.
+    if !customMetadata.contains(name: "user-agent") {
+      headers.add(name: "user-agent", value: GRPCClientStateMachine.userAgent)
     }
 
     return headers
@@ -706,7 +760,8 @@ extension GRPCClientStateMachine.State {
     //
     // See: https://github.com/grpc/grpc/blob/master/doc/http-grpc-status-mapping.md
     let statusHeader = trailers.first(name: ":status")
-    guard let status = statusHeader.flatMap(Int.init).map({ HTTPResponseStatus(statusCode: $0) }) else {
+    guard let status = statusHeader.flatMap(Int.init).map({ HTTPResponseStatus(statusCode: $0) })
+    else {
       return .failure(.invalidHTTPStatus(statusHeader))
     }
 
@@ -719,8 +774,12 @@ extension GRPCClientStateMachine.State {
       }
     }
 
-    let contentTypeHeader = trailers.first(name: "content-type")
-    guard contentTypeHeader.map(ContentType.init) != nil else {
+    // Only validate the content-type header if it's present. This is a small deviation from the
+    // spec as the content-type is meant to be sent in "Trailers-Only" responses. However, if it's
+    // missing then we should avoid the error and propagate the status code and message sent by
+    // the server instead.
+    if let contentTypeHeader = trailers.first(name: "content-type"),
+      ContentType(value: contentTypeHeader) == nil {
       return .failure(.invalidContentType(contentTypeHeader))
     }
 

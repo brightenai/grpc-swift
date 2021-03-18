@@ -14,9 +14,9 @@
  * limitations under the License.
  */
 import Foundation
+import Logging
 import NIO
 import NIOConcurrencyHelpers
-import Logging
 
 /// The connectivity state of a client connection. Note that this is heavily lifted from the gRPC
 /// documentation: https://github.com/grpc/grpc/blob/master/doc/connectivity-semantics-and-api.md.
@@ -47,12 +47,25 @@ public enum ConnectivityState {
   case shutdown
 }
 
-public protocol ConnectivityStateDelegate: class {
+public protocol ConnectivityStateDelegate: AnyObject {
   /// Called when a change in `ConnectivityState` has occurred.
   ///
   /// - Parameter oldState: The old connectivity state.
   /// - Parameter newState: The new connectivity state.
   func connectivityStateDidChange(from oldState: ConnectivityState, to newState: ConnectivityState)
+
+  /// Called when the connection has started quiescing, that is, the connection is going away but
+  /// existing RPCs may continue to run.
+  ///
+  /// - Important: When this is called no new RPCs may be created until the connectivity state
+  ///   changes to 'idle' (the connection successfully quiesced) or 'transientFailure' (the
+  ///   connection was closed before quiescing completed). Starting RPCs before these state changes
+  ///   will lead to a connection error and the immediate failure of any outstanding RPCs.
+  func connectionStartedQuiescing()
+}
+
+extension ConnectivityStateDelegate {
+  public func connectionStartedQuiescing() {}
 }
 
 public class ConnectivityStateMonitor {
@@ -74,10 +87,8 @@ public class ConnectivityStateMonitor {
 
   /// The current state of connectivity.
   public var state: ConnectivityState {
-    get {
-      return self.stateLock.withLock {
-        self._state
-      }
+    return self.stateLock.withLock {
+      self._state
     }
   }
 
@@ -110,13 +121,21 @@ public class ConnectivityStateMonitor {
     if let (oldState, newState) = change {
       logger.info("connectivity state change", metadata: [
         "old_state": "\(oldState)",
-        "new_state": "\(newState)"
+        "new_state": "\(newState)",
       ])
 
       self.delegateCallbackQueue.async {
         if let delegate = self.delegate {
           delegate.connectivityStateDidChange(from: oldState, to: newState)
         }
+      }
+    }
+  }
+
+  internal func beginQuiescing() {
+    self.delegateCallbackQueue.async {
+      if let delegate = self.delegate {
+        delegate.connectionStartedQuiescing()
       }
     }
   }
