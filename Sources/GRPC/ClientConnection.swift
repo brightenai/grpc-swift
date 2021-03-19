@@ -178,6 +178,8 @@ extension ClientConnection: GRPCChannel {
     self.populateLogger(in: &options)
     let multiplexer = self.getMultiplexer()
 
+    NSLog("makeCall EE")
+
     return Call(
       path: path,
       type: type,

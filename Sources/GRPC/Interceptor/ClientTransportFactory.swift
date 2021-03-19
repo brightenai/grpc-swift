@@ -15,6 +15,8 @@
  */
 import NIO
 import NIOHTTP2
+import Foundation
+
 import protocol SwiftProtobuf.Message
 
 /// A `ClientTransport` factory for an RPC.
@@ -73,6 +75,9 @@ internal struct ClientTransportFactory<Request, Response> {
     scheme: String,
     errorDelegate: ClientErrorDelegate?
   ) -> ClientTransportFactory<Request, Response> {
+    
+    NSLog("http2 HTTP2ClientTransportFactory FF")
+
     let http2 = HTTP2ClientTransportFactory<Request, Response>(
       multiplexer: multiplexer,
       scheme: scheme,
@@ -207,6 +212,9 @@ private struct HTTP2ClientTransportFactory<Request, Response> {
     onError: @escaping (Error) -> Void,
     onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
   ) -> ClientTransport<Request, Response> {
+    
+    NSLog("http2 makeTransport")
+
     return ClientTransport(
       details: self.makeCallDetails(type: type, path: path, options: options),
       eventLoop: self.multiplexer.eventLoop,

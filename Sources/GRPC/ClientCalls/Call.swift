@@ -17,6 +17,8 @@ import Logging
 import NIO
 import NIOHPACK
 import NIOHTTP2
+import Foundation
+
 import protocol SwiftProtobuf.Message
 
 /// An object representing a single RPC from the perspective of a client. It allows the caller to
@@ -236,6 +238,8 @@ extension Call {
     self.eventLoop.assertInEventLoop()
     let compress = self.compress(compression)
 
+    NSLog("_sendMessagesAA")
+
     var iterator = messages.makeIterator()
     var maybeNext = iterator.next()
     while let current = maybeNext {
@@ -288,6 +292,8 @@ extension Call {
   @inlinable
   internal func _send(_ part: GRPCClientRequestPart<Request>, promise: EventLoopPromise<Void>?) {
     self.eventLoop.assertInEventLoop()
+
+    NSLog("_send BB")
 
     switch self._state {
     case .idle:

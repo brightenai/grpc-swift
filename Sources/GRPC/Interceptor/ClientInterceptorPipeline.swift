@@ -17,7 +17,7 @@ import Logging
 import NIO
 import NIOHPACK
 import NIOHTTP2
-
+import Foundation
 /// A pipeline for intercepting client request and response streams.
 ///
 /// The interceptor pipeline lies between the call object (`UnaryCall`, `ClientStreamingCall`, etc.)
@@ -348,6 +348,8 @@ internal final class ClientInterceptorPipeline<Request, Response> {
     promise: EventLoopPromise<Void>?,
     onContextAtUncheckedIndex index: Int
   ) {
+    NSLog("_invokeSend DD")
+
     switch index {
     case self._headIndex:
       self._onRequestPart(part, promise)

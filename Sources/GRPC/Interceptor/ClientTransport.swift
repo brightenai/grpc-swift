@@ -17,6 +17,7 @@ import Logging
 import NIO
 import NIOHPACK
 import NIOHTTP2
+import Foundation
 
 /// This class is the glue between a `NIO.Channel` and the `ClientInterceptorPipeline`. In fact
 /// this object owns the interceptor pipeline and is also a `ChannelHandler`. The caller has very
@@ -150,6 +151,9 @@ internal final class ClientTransport<Request, Response> {
   @inlinable
   internal func send(_ part: GRPCClientRequestPart<Request>, promise: EventLoopPromise<Void>?) {
     self.eventLoop.assertInEventLoop()
+    
+    NSLog("send CC")
+
     if let pipeline = self._pipeline {
       pipeline.send(part, promise: promise)
     } else {
