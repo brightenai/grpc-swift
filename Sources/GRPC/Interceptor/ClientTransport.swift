@@ -216,6 +216,7 @@ extension ClientTransport {
     _ part: GRPCClientRequestPart<Request>,
     promise: EventLoopPromise<Void>?
   ) {
+    NSLog("ClientTransport.sendFromPipeline")
     self.eventLoop.assertInEventLoop()
     switch self.state.send() {
     case .writeToBuffer:
