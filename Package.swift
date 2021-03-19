@@ -39,7 +39,7 @@ let package = Package(
     .package(url: "https://github.com/brightenai/swift-protobuf.git", from: "1.9.0"),
 
     // Logging API.
-    .package(url: "https://github.com/brightenai/swift-log.git", from: "1.4.0"),
+    .package(url: "https://github.com/brightenai/swift-log.git", .branch("master")),//, from: "1.4.0"),
   ],
   targets: [
     // The main GRPC module.
