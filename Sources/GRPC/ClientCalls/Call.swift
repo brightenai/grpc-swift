@@ -238,7 +238,7 @@ extension Call {
     self.eventLoop.assertInEventLoop()
     let compress = self.compress(compression)
 
-    NSLog("_sendMessagesAA")
+//    NSLog("_sendMessagesAA")
 
     var iterator = messages.makeIterator()
     var maybeNext = iterator.next()
@@ -293,7 +293,7 @@ extension Call {
   internal func _send(_ part: GRPCClientRequestPart<Request>, promise: EventLoopPromise<Void>?) {
     self.eventLoop.assertInEventLoop()
 
-    NSLog("_send BB")
+//    NSLog("_send BB")
 
     switch self._state {
     case .idle:

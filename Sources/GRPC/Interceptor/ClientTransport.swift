@@ -152,7 +152,7 @@ internal final class ClientTransport<Request, Response> {
   internal func send(_ part: GRPCClientRequestPart<Request>, promise: EventLoopPromise<Void>?) {
     self.eventLoop.assertInEventLoop()
     
-    NSLog("send CC")
+//    NSLog("send CC")
 
     if let pipeline = self._pipeline {
       pipeline.send(part, promise: promise)
@@ -216,7 +216,7 @@ extension ClientTransport {
     _ part: GRPCClientRequestPart<Request>,
     promise: EventLoopPromise<Void>?
   ) {
-    NSLog("ClientTransport.sendFromPipeline")
+//    NSLog("ClientTransport.sendFromPipeline")
     self.eventLoop.assertInEventLoop()
     switch self.state.send() {
     case .writeToBuffer:

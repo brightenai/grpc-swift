@@ -348,7 +348,7 @@ internal final class ClientInterceptorPipeline<Request, Response> {
     promise: EventLoopPromise<Void>?,
     onContextAtUncheckedIndex index: Int
   ) {
-    NSLog("_invokeSend DD")
+//    NSLog("_invokeSend DD")
 
     switch index {
     case self._headIndex:

@@ -76,7 +76,7 @@ internal struct ClientTransportFactory<Request, Response> {
     errorDelegate: ClientErrorDelegate?
   ) -> ClientTransportFactory<Request, Response> {
     
-    NSLog("http2 HTTP2ClientTransportFactory FF")
+//    NSLog("http2 HTTP2ClientTransportFactory FF")
 
     let http2 = HTTP2ClientTransportFactory<Request, Response>(
       multiplexer: multiplexer,
@@ -213,7 +213,7 @@ private struct HTTP2ClientTransportFactory<Request, Response> {
     onResponsePart: @escaping (GRPCClientResponsePart<Response>) -> Void
   ) -> ClientTransport<Request, Response> {
     
-    NSLog("http2 makeTransport")
+//    NSLog("http2 makeTransport")
 
     return ClientTransport(
       details: self.makeCallDetails(type: type, path: path, options: options),
