@@ -388,6 +388,8 @@ struct GRPCIdleHandlerStateMachine {
   mutating func initiateGracefulShutdown() -> Operations {
     var operations: Operations = .none
 
+      print("initiateGracefulShutdown---")
+      
     switch self.state {
     case let .operating(state):
       // Send a GOAWAY frame.
