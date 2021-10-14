@@ -162,7 +162,7 @@ public final class Server {
   private let quiescingHelper: ServerQuiescingHelper
   private var errorDelegate: ServerErrorDelegate?
 
-  private init(
+  public init(
     channel: Channel,
     quiescingHelper: ServerQuiescingHelper,
     errorDelegate: ServerErrorDelegate?

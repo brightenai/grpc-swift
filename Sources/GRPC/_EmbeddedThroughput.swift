@@ -21,20 +21,49 @@ extension EmbeddedChannel {
   /// Configures an `EmbeddedChannel` for the `EmbeddedClientThroughput` benchmark.
   ///
   /// - Important: This is **not** part of the public API.
-  public func _configureForEmbeddedThroughputTest<Request: Message, Response: Message>(
-    callType: GRPCCallType,
-    logger: Logger,
-    requestType: Request.Type = Request.self,
-    responseType: Response.Type = Response.self
-  ) -> EventLoopFuture<Void> {
-    return self.pipeline.addHandlers([
-      GRPCClientChannelHandler(callType: callType, logger: logger),
-      GRPCClientCodecHandler(
-        serializer: ProtobufSerializer<Request>(),
-        deserializer: ProtobufDeserializer<Response>()
-      ),
-    ])
-  }
+    public func _configureForEmbeddedThroughputTest<Request: Message, Response: Message>(
+      callType: GRPCCallType,
+      logger: Logger,
+      requestType: Request.Type = Request.self,
+      responseType: Response.Type = Response.self
+    ) -> EventLoopFuture<Void> {
+      return self.pipeline.addHandlers([
+        GRPCClientChannelHandler(callType: callType, logger: logger),
+        GRPCClientCodecHandler(
+          serializer: ProtobufSerializer<Request>(),
+          deserializer: ProtobufDeserializer<Response>()
+        ),
+      ])
+    }
+    
+    public func _configureForEmbeddedThroughputTest1<Request: Message, Response: Message>(
+      callType: GRPCCallType,
+      logger: Logger,
+      requestType: Request.Type = Request.self,
+      responseType: Response.Type = Response.self
+    ) -> EventLoopFuture<Void> {
+      return self.pipeline.addHandlers([
+        GRPCClientChannelHandler(callType: callType, logger: logger),
+        GRPCClientCodecHandler(
+          serializer: ProtobufSerializer<Request>(),
+          deserializer: ProtobufDeserializer<Response>()
+        ),
+      ])
+    }
+    public func _configureForEmbeddedThroughputTest2<Request: Message, Response: Message>(
+      callType: GRPCCallType,
+      logger: Logger,
+      requestType: Request.Type = Request.self,
+      responseType: Response.Type = Response.self
+    ) -> EventLoopFuture<Void> {
+      return self.pipeline.addHandlers([
+        GRPCClientChannelHandler(callType: callType, logger: logger),
+        GRPCClientCodecHandler(
+          serializer: ProtobufSerializer<Request>(),
+          deserializer: ProtobufDeserializer<Response>()
+        ),
+      ])
+    }
 
   public func _configureForEmbeddedServerTest(
     servicesByName serviceProviders: [Substring: CallHandlerProvider],

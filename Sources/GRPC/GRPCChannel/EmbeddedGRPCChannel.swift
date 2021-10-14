@@ -19,8 +19,8 @@ import NIOHTTP2
 import SwiftProtobuf
 
 // This is currently intended for internal testing only.
-class EmbeddedGRPCChannel: GRPCChannel {
-  let embeddedChannel: EmbeddedChannel
+public class EmbeddedGRPCChannel: GRPCChannel {
+  public let embeddedChannel: EmbeddedChannel
   let multiplexer: EventLoopFuture<HTTP2StreamMultiplexer>
 
   let logger: Logger
@@ -28,7 +28,7 @@ class EmbeddedGRPCChannel: GRPCChannel {
   let authority: String
   let errorDelegate: ClientErrorDelegate?
 
-  func close() -> EventLoopFuture<Void> {
+  public func close() -> EventLoopFuture<Void> {
     return self.embeddedChannel.close()
   }
 
@@ -36,7 +36,7 @@ class EmbeddedGRPCChannel: GRPCChannel {
     return self.embeddedChannel.eventLoop
   }
 
-  init(
+  public init(
     logger: Logger = Logger(label: "io.grpc", factory: { _ in SwiftLogNoOpLogHandler() }),
     errorDelegate: ClientErrorDelegate? = nil
   ) {
@@ -54,7 +54,7 @@ class EmbeddedGRPCChannel: GRPCChannel {
     self.errorDelegate = errorDelegate
   }
 
-  internal func makeCall<Request: Message, Response: Message>(
+  public  func makeCall<Request: Message, Response: Message>(
     path: String,
     type: GRPCCallType,
     callOptions: CallOptions,
@@ -75,7 +75,7 @@ class EmbeddedGRPCChannel: GRPCChannel {
     )
   }
 
-  internal func makeCall<Request: GRPCPayload, Response: GRPCPayload>(
+  public func makeCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     type: GRPCCallType,
     callOptions: CallOptions,
