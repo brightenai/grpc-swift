@@ -364,11 +364,11 @@ private enum ClientTransportState {
   /// Idle. We're waiting for the RPC to be configured.
   ///
   /// Valid transitions:
-  /// - `awaitingTransport` (the transport is being configured)
+  /// - `/*/*await*/*/ingTransport` (the transport is being configured)
   /// - `closed` (the RPC cancels)
   case idle
 
-  /// Awaiting transport. The RPC has requested transport and we're waiting for that transport to
+  /// /*await*/ing transport. The RPC has requested transport and we're waiting for that transport to
   /// activate. We'll buffer any outbound messages from this state. Receiving messages from the
   /// transport in this state is an error.
   ///
@@ -376,7 +376,7 @@ private enum ClientTransportState {
   /// - `activatingTransport` (the channel becomes active)
   /// - `closing` (the RPC cancels)
   /// - `closed` (the channel fails to become active)
-  case awaitingTransport
+  case /*/*await*/*/ingTransport
 
   /// The transport is active but we're unbuffering any requests to write on that transport.
   /// We'll continue buffering in this state. Receiving messages from the transport in this state
@@ -414,7 +414,7 @@ private enum ClientTransportState {
     switch self {
     case .activatingTransport:
       return true
-    case .idle, .awaitingTransport, .active, .closing, .closed:
+    case .idle, ./*/*await*/*/ingTransport, .active, .closing, .closed:
       return false
     }
   }
@@ -422,7 +422,7 @@ private enum ClientTransportState {
   /// Whether this state allows writes to be buffered. (This is useful only to inform logging.)
   internal var mayBuffer: Bool {
     switch self {
-    case .idle, .activatingTransport, .awaitingTransport:
+    case .idle, .activatingTransport, ./*/*await*/*/ingTransport:
       return true
     case .active, .closing, .closed:
       return false
@@ -437,10 +437,10 @@ extension ClientTransportState {
     switch self {
     // We're idle until we configure. Anything else is just a repeat request to configure.
     case .idle:
-      self = .awaitingTransport
+      self = ./*/*await*/*/ingTransport
       return true
 
-    case .awaitingTransport, .activatingTransport, .active, .closing, .closed:
+    case ./*/*await*/*/ingTransport, .activatingTransport, .active, .closing, .closed:
       return false
     }
   }
@@ -458,7 +458,7 @@ extension ClientTransportState {
   mutating func send() -> SendAction {
     switch self {
     // We don't have any transport yet, just buffer the part.
-    case .idle, .awaitingTransport, .activatingTransport:
+    case .idle, ./*/*await*/*/ingTransport, .activatingTransport:
       return .writeToBuffer
 
     // We have a `Channel`, we can pipe the write straight through.
@@ -483,7 +483,7 @@ extension ClientTransportState {
     switch self {
     // These can't happen since we only begin unbuffering when we transition to
     // '.activatingTransport', which must come after these two states..
-    case .idle, .awaitingTransport:
+    case .idle, ./*/*await*/*/ingTransport:
       preconditionFailure("Requests can't be unbuffered before the transport is activated")
 
     // We dealt with any buffered writes. We can become active now. This is the only way to become
@@ -512,7 +512,7 @@ extension ClientTransportState {
       self = .closed
       return true
 
-    case .awaitingTransport:
+    case ./*/*await*/*/ingTransport:
       // An RPC has started and we're waiting for the `Channel` to activate. We'll mark ourselves as
       // closing. We don't need to explicitly close the `Channel`, this will happen as a result of
       // the `Channel` becoming active (see `channelActive(context:)`).
@@ -544,7 +544,7 @@ extension ClientTransportState {
     case .idle:
       preconditionFailure("Can't activate an idle transport")
 
-    case .awaitingTransport:
+    case ./*/*await*/*/ingTransport:
       self = .activatingTransport
       return true
 
@@ -576,7 +576,7 @@ extension ClientTransportState {
       // We can't become inactive before we've requested a `Channel`.
       preconditionFailure("Can't deactivate an idle transport")
 
-    case .awaitingTransport, .activatingTransport, .active:
+    case ./*/*await*/*/ingTransport, .activatingTransport, .active:
       // We're activating the transport - i.e. offloading any buffered requests - and the channel
       // became inactive. We haven't received an error (otherwise we'd be `closing`) so we should
       // synthesize an error status to fail the RPC with.
@@ -598,7 +598,7 @@ extension ClientTransportState {
   /// indicating whether the part that was read should be forwarded to the interceptor pipeline.
   mutating func channelRead(isEnd: Bool) -> Bool {
     switch self {
-    case .idle, .awaitingTransport:
+    case .idle, ./*/*await*/*/ingTransport:
       // If there's no `Channel` or the `Channel` isn't active, then we can't read anything.
       preconditionFailure("Can't receive response part on idle transport")
 
@@ -632,7 +632,7 @@ extension ClientTransportState {
       // The `Channel` can't error if it doesn't exist.
       preconditionFailure("Can't catch error on idle transport")
 
-    case .awaitingTransport:
+    case ./*/*await*/*/ingTransport:
       // We're waiting for the `Channel` to become active. We're toast now, so close, failing any
       // buffered writes along the way.
       self = .closing
@@ -662,7 +662,7 @@ extension ClientTransportState {
   /// The caller has asked for the underlying `Channel`.
   mutating func getChannel() -> GetChannelAction {
     switch self {
-    case .idle, .awaitingTransport, .activatingTransport:
+    case .idle, ./*/*await*/*/ingTransport, .activatingTransport:
       // Do nothing, we'll complete the promise when we become active or closed.
       return .doNothing
 
