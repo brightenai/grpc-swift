@@ -19,6 +19,7 @@ import Foundation
 
 let package = Package(
   name: "grpc-swift",
+  type:.dynamic,
   products: [
     .library(name: "GRPC", targets: ["GRPC"]),
     .library(name: "CGRPCZlib", targets: ["CGRPCZlib"]),
