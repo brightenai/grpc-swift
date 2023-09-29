@@ -21,7 +21,7 @@ let package = Package(
   name: "grpc-swift",
   products: [
     .library(name: "GRPC", 
-	  type:.dynamic,
+//	  type:.dynamic,
     	targets: ["GRPC"]
     ),
     .library(name: "CGRPCZlib", targets: ["CGRPCZlib"]),
